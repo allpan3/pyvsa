@@ -3,7 +3,7 @@ import torch.nn as nn
 from torch import Tensor
 import torch
 from typing import Literal, List
-from . import VSA
+from .vsa import VSA
 
 # %%
 class Resonator(nn.Module):
