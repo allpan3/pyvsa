@@ -2,7 +2,7 @@
 
 from setuptools import setup
 
-setup(name='vsa',
+setup(name='pyvsa',
       version='0.1',
       description='Vector Symbolic Architecture',
       author='Allen Pan',
