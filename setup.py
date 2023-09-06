@@ -10,7 +10,6 @@ setup(name='pyvsa',
       url='',
       packages=['vsa'],
       install_requires=[
-        "torch>=1.9.0",
-        "torchvision",
+        "torch>=1.9.0"
     ],
 )

@@ -14,7 +14,6 @@
 # %%
 import torch
 from torch import Tensor
-from torchvision.datasets import utils
 import os.path
 from typing import List, Tuple
 import random
@@ -158,7 +157,7 @@ class VSA:
             return self.multiset(torch.stack([self.get_vector(key[i]) for i in range(len(key))]))
 
     def _check_exists(self, file) -> bool:
-        return utils.check_integrity(os.path.join(self.root, file))
+        return os.path.exists(os.path.join(self.root, file))
 
     def empty(self, num_vectors: int, dimensions: int) -> Tensor:
         return torch.empty(num_vectors, dimensions, dtype=self.dtype, device=self.device)
