@@ -120,7 +120,7 @@ class VSA:
             codebooks = self.codebooks
         
         if type(codebooks) == list:
-            winners = torch.empty((inputs.size(0), self.num_factors), dtype=torch.int8, device=self.device)
+            winners = torch.empty((inputs.size(0), len(codebooks)), dtype=torch.int8, device=self.device)
             for i in range(len(codebooks)):
                 if abs:
                     winners[:,i] = torch.argmax(torch.abs(self.similarity(inputs[:,i], codebooks[i])), -1)
@@ -141,8 +141,7 @@ class VSA:
         Instead of pre-generate the dictionary, we combine factors to get the vector on the fly
         This saves meomry, and also the dictionary lookup is only used during sampling and comparison
         '''
-        assert(len(key) == self.num_factors)
-        factors = [self.codebooks[i][key[i]] for i in range(self.num_factors)]
+        factors = [self.codebooks[i][key[i]] for i in range(len(key))]
         return self.multibind(torch.stack(factors)).to(self.device)
 
     def __getitem__(self, key: list):
@@ -153,7 +152,6 @@ class VSA:
         if (len(key) == 1):
             return self.get_vector(key[0])
         else:
-            # TODO to be tested
             return self.multiset(torch.stack([self.get_vector(key[i]) for i in range(len(key))]))
 
     def _check_exists(self, file) -> bool:
