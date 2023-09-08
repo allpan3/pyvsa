@@ -140,6 +140,8 @@ class VSA:
         `key` is a tuple of indices of each factor
         Instead of pre-generate the dictionary, we combine factors to get the vector on the fly
         This saves meomry, and also the dictionary lookup is only used during sampling and comparison
+        The vector doesn't need to be composed of all available factors. Only the first n codebooks
+        are used when the key length is n.
         '''
         factors = [self.codebooks[i][key[i]] for i in range(len(key))]
         return self.multibind(torch.stack(factors)).to(self.device)
@@ -248,6 +250,7 @@ class VSA:
             raise RuntimeError(
                 f"data needs to have at least two dimensions for multiset, got size: {tuple(inputs.shape)}"
             )
+        assert(inputs.size(-2) > 0)
         # One weight for each vector in inputs
         if weights != None:
             assert(inputs.size(-2) == weights.size(-1))
@@ -261,6 +264,11 @@ class VSA:
         return result
     
     def _multiset_hardware(self, inputs: Tensor, weights: Tensor = None, normalize = True) -> Tensor:
+        if inputs.dim() < 2:
+            raise RuntimeError(
+                f"data needs to have at least two dimensions for multiset, got size: {tuple(inputs.shape)}"
+            )
+        assert(inputs.size(-2) > 0)
         min_one = torch.tensor(-1, dtype=inputs.dtype, device=inputs.device)
         inputs_as_bipolar = torch.where(inputs == 0, min_one, inputs) 
         if weights != None:
