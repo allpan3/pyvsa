@@ -1,11 +1,11 @@
 ############################################################################################
 # The VSA operation portion is inspired by torchhd library, tailored for our project purpose
-# We use only the MAP model, but with two variants: software and hardware models
-# In the software model, the definitions and operations are exactly the same as MAP model
-# In the hardware model, the representation is BSC-like, but the operations are still MAP-like.
+# We use only the MAP model, but with two variants: software and hardware modes.
+# In the software mode, the definitions and operations are exactly the same as MAP model
+# In the hardware mode, the representation is BSC-like, but the operations are still MAP-like.
 # We use binary in place of bipolar whenever possible to reduce the complexity of the hardware,
 # but the bahaviors still closely follow MAP model.
-# For example, we use XNOR for binding to get the exact same input-output mapping. We bipolize the
+# For example, we use XNOR for binding to get the exact same input-output mapping. We bipolarize the
 # values in bundle and hamming distance operations to get the same results as MAP model.
 # The original library is located at:
 # https://github.com/hyperdimensional-computing/torchhd.git
@@ -17,7 +17,7 @@ from torch import Tensor
 import os.path
 from typing import List, Tuple
 import random
-from typing import Set, Literal
+from typing import Literal
 
 # %%
 class VSA:
@@ -27,7 +27,7 @@ class VSA:
     def __init__(
             self,
             root: str,
-            model: Literal['SOFTWARE', 'HARDWARE'],
+            mode: Literal['SOFTWARE', 'HARDWARE'],
             dim: int,
             num_factors: int,
             num_codevectors: int or Tuple[int], # number of vectors per factor, or tuple of number of codevectors for each factor
@@ -36,7 +36,7 @@ class VSA:
         ):
 
         self.root = root
-        self.model = model
+        self.mode = mode
         self.device = device
         # default is float, we may want to use int
         self.dtype = torch.int8
@@ -45,14 +45,14 @@ class VSA:
         self.num_codevectors = num_codevectors
 
         # Assign functions
-        if (model == "SOFTWARE"):
+        if (mode == "SOFTWARE"):
             self.random = self._random_software
             self.similarity = self._similarity_software
             self.bind = self._bind_software
             self.multibind = self._multibind_software
             self.bundle = self._bundle_software
             self.multiset = self._multiset_software
-        elif (model == "HARDWARE"):
+        elif (mode == "HARDWARE"):
             self.random = self._random_hardware
             self.similarity = self._similarity_hardware
             self.bind = self._bind_hardware
@@ -101,9 +101,9 @@ class VSA:
         # orig = vector.clone()
         indices = [random.random() < noise for i in range(self.dim)]
         def flip(vector):
-            if self.model == "SOFTWARE":
+            if self.mode == "SOFTWARE":
                 return -vector
-            elif self.model == "HARDWARE":
+            elif self.mode == "HARDWARE":
                 return 1 - vector
 
         vector[indices] = flip(vector[indices])
@@ -303,10 +303,10 @@ class VSA:
         return torch.sum(bipolar, dim=-1, dtype=torch.int64)
 
     def normalize(self, input):
-        if self.model == "SOFTWARE":
+        if self.mode == "SOFTWARE":
             positive = torch.tensor(1, dtype=input.dtype, device=input.device)
             negative = torch.tensor(-1, dtype=input.dtype, device=input.device)
-        elif self.model == "HARDWARE":
+        elif self.mode == "HARDWARE":
             positive = torch.tensor(1, dtype=input.dtype, device=input.device)
             negative = torch.tensor(0, dtype=input.dtype, device=input.device)
         return torch.where(input >= 0, positive, negative)
