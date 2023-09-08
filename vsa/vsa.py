@@ -86,14 +86,14 @@ class VSA:
 
         return l
 
-    def sample(self, num_samples, num_vectors_supoerposed = 1, noise=0.0):
+    def sample(self, num_samples, num_vectors_superposed = 1, noise=0.0):
         '''
         Sample `num_samples` random vectors from the dictionary, or multiple vectors superposed
         '''
         labels = [None] * num_samples
         vectors = self.empty(num_samples, self.dim)
         for i in range(num_samples):
-            labels[i]= [tuple([random.randint(0, len(self.codebooks[i])-1) for i in range(self.num_factors)]) for j in range(num_vectors_supoerposed)]
+            labels[i]= [tuple([random.randint(0, len(self.codebooks[i])-1) for i in range(self.num_factors)]) for j in range(num_vectors_superposed)]
             vectors[i] = self.apply_noise(self.__getitem__(labels[i]), noise)
         return labels, vectors
 
