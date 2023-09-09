@@ -86,7 +86,7 @@ class VSA:
 
         return l
 
-    def sample(self, num_samples, num_factors = None, num_vectors = 1, bundled = False, noise=0.0):
+    def sample(self, num_samples, num_factors = None, num_vectors = 1, bundled = True, noise=0.0):
         '''
         Generate `num_samples` random samples, each containing `num_vectors` compositional vectors.
         If `bundled` is True, these vectors are bundled into one, else a list of `num_vectors` are returned.
@@ -159,7 +159,7 @@ class VSA:
         factors = [self.codebooks[i][key[i]] for i in range(len(key))]
         return self.multibind(torch.stack(factors)).to(self.device)
 
-    def get_vector(self, key: list or tuple, normalize = None, noise = 0.0):
+    def get_vector(self, key: list or tuple, normalize = None, noise = None):
         '''
         `key` is a list of tuples in [(f0, f1, f2, ...), ...] format, or a single tuple
         fx is the index of the codevector in a codebook, which is also its label.
@@ -170,16 +170,16 @@ class VSA:
         assert(not (not normalize and self.mode == "HARDWARE"))
         
         if (type(key) == tuple):
-            return self.apply_noise(self._get_vector(key), noise)
+            return self._get_vector(key) if noise == None else self.apply_noise(self._get_vector(key), noise)
         elif (len(key) == 1):
-            return self.apply_noise(self._get_vector(key[0]), noise)
+            return self._get_vector(key[0]) if noise == None else self.apply_noise(self._get_vector(key[0]), noise)
         else:
             if normalize:
                 # If normalize, apply noise after bundling
-                return self.apply_noise(self.multiset(torch.stack([self._get_vector(key[i]) for i in range(len(key))]), normalize=normalize), noise)
+                return self.multiset(torch.stack([self._get_vector(key[i]) for i in range(len(key))]), normalize=normalize) if noise == None else self.apply_noise(self.multiset(torch.stack([self._get_vector(key[i]) for i in range(len(key))]), normalize=normalize), noise)
             else:
                 # Otherwise apply noise to pre-bundled vectors
-                return self.multiset(torch.stack([self.apply_noise(self._get_vector(key[i]), noise) for i in range(len(key))]), normalize=normalize)
+                return self.multiset(torch.stack([self._get_vector(key[i]) for i in range(len(key))]), normalize=normalize) if noise == None else self.multiset(torch.stack([self.apply_noise(self._get_vector(key[i]), noise) for i in range(len(key))]), normalize=normalize)
 
     def _check_exists(self, file) -> bool:
         return os.path.exists(os.path.join(self.root, file))
