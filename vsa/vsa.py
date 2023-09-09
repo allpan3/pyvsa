@@ -86,19 +86,35 @@ class VSA:
 
         return l
 
-    def sample(self, num_samples, num_vectors_superposed = 1, noise=0.0):
+    def sample(self, num_samples, num_factors = None, num_vectors = 1, bundled = False, noise=0.0):
         '''
-        Sample `num_samples` random vectors from the dictionary, or multiple vectors superposed
+        Generate `num_samples` random samples, each containing `num_vectors` compositional vectors.
+        If `bundled` is True, these vectors are bundled into one, else a list of `num_vectors` are returned.
+        The vector is composed of factors from the first n `num_factors` codebooks if `num_factors` is specified
+        Otherwise it is composed of all available factors
         '''
+        if num_factors == None:
+            num_factors = self.num_factors
+        assert(num_factors <= self.num_factors)
+
         labels = [None] * num_samples
-        vectors = self.empty(num_samples, self.dim)
+        vectors = [[] for _ in range(num_samples)]
         for i in range(num_samples):
-            labels[i]= [tuple([random.randint(0, len(self.codebooks[i])-1) for i in range(self.num_factors)]) for j in range(num_vectors_superposed)]
-            vectors[i] = self.apply_noise(self.__getitem__(labels[i]), noise)
+            labels[i] = [tuple([random.randint(0, len(self.codebooks[i])-1) for i in range(num_factors)]) for j in range(num_vectors)]
+            if bundled:
+                # __getitem__ automatically bundles the vectors when label contain multiple tuples
+                vectors[i] = self.__getitem__(labels[i], noise)
+            else:
+                for j in range(num_vectors):
+                    # Intentially not stacked since we want to keep the vectors separate
+                    vectors[i] = [self.__getitem__(labels[i][j], noise) for j in range(num_vectors)]
+        try: 
+            vectors = torch.stack(vectors)
+        except:
+            pass
         return labels, vectors
 
     def apply_noise(self, vector, noise):
-        # orig = vector.clone()
         indices = [random.random() < noise for i in range(self.dim)]
         def flip(vector):
             if self.mode == "SOFTWARE":
@@ -108,7 +124,6 @@ class VSA:
 
         vector[indices] = flip(vector[indices])
         
-        # print("Verify noise:" + str(self.similarity(orig, vector)))
         return vector.to(self.device)
 
     def cleanup(self, inputs, codebooks = None, abs = True):
@@ -146,15 +161,17 @@ class VSA:
         factors = [self.codebooks[i][key[i]] for i in range(len(key))]
         return self.multibind(torch.stack(factors)).to(self.device)
 
-    def __getitem__(self, key: list):
+    def __getitem__(self, key: list or tuple, noise = 0.0):
         '''
-        `key` is a list of tuples in [(f0, f1, f2, ...), ...] format.
+        `key` is a list of tuples in [(f0, f1, f2, ...), ...] format, or a single tuple
         fx is the index of the factor in the codebook, which is also its label.
         '''
-        if (len(key) == 1):
-            return self.get_vector(key[0])
+        if (type(key) == tuple):
+            return self.apply_noise(self.get_vector(key), noise)
+        elif (len(key) == 1):
+            return self.apply_noise(self.get_vector(key[0]), noise)
         else:
-            return self.multiset(torch.stack([self.get_vector(key[i]) for i in range(len(key))]))
+            return self.multiset(torch.stack([self.apply_noise(self.get_vector(key[i]), noise) for i in range(len(key))]))
 
     def _check_exists(self, file) -> bool:
         return os.path.exists(os.path.join(self.root, file))
