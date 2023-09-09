@@ -138,7 +138,7 @@ class Resonator(nn.Module):
         
         return output
 
-    def get_init_estimates(self, codebooks = None, normalize: bool = True, batch_size: int = 1) -> Tensor:
+    def get_init_estimates(self, codebooks = None, batch_size: int = 1) -> Tensor:
         """
         Generate the initial estimates as well as reorder codebooks for the resonator network.
         """
@@ -148,10 +148,10 @@ class Resonator(nn.Module):
         if (type(codebooks) == list):
             guesses = [None] * len(codebooks)
             for i in range(len(codebooks)):
-                guesses[i] = self.vsa.multiset(codebooks[i], normalize=normalize)
+                guesses[i] = self.vsa.multiset(codebooks[i])
             init_estimates = torch.stack(guesses).to(self.device)
         else:
-            init_estimates = self.vsa.multiset(codebooks, normalize=normalize).to(self.device)
+            init_estimates = self.vsa.multiset(codebooks).to(self.device)
         
         return init_estimates.unsqueeze(0).repeat(batch_size,1,1)
 

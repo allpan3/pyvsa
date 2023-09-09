@@ -93,6 +93,7 @@ class VSA:
         The vector is composed of factors from the first n `num_factors` codebooks if `num_factors` is specified
         Otherwise it is composed of all available factors
         '''
+
         if num_factors == None:
             num_factors = self.num_factors
         assert(num_factors <= self.num_factors)
@@ -102,11 +103,10 @@ class VSA:
         for i in range(num_samples):
             labels[i] = [tuple([random.randint(0, len(self.codebooks[i])-1) for i in range(num_factors)]) for j in range(num_vectors)]
             if bundled:
-                # __getitem__ automatically bundles the vectors when label contain multiple tuples
-                vectors[i] = self.__getitem__(labels[i], noise)
+                vectors[i] = self.get_vector(labels[i], noise=noise)
             else:
                 # Intentially not stacked since we want to keep the vectors separate
-                vectors[i] = [self.__getitem__(labels[i][j], noise) for j in range(num_vectors)]
+                vectors[i] = [self.get_vector(labels[i][j], noise=noise) for j in range(num_vectors)]
         try: 
             vectors = torch.stack(vectors)
         except:
@@ -148,29 +148,38 @@ class VSA:
                 winners = torch.argmax(self.similarity(inputs.unsqueeze(-2), codebooks).squeeze(-2), -1)
             return [tuple(winners[i].tolist()) for i in range(winners.size(0))]
       
-
-    def get_vector(self, key:tuple):
+    def _get_vector(self, key:tuple):
         '''
         `key` is a tuple of indices of each factor
         Instead of pre-generate the dictionary, we combine factors to get the vector on the fly
-        This saves meomry, and also the dictionary lookup is only used during sampling and comparison
+        This saves memory, and also the dictionary lookup is only used during sampling and comparison
         The vector doesn't need to be composed of all available factors. Only the first n codebooks
         are used when the key length is n.
         '''
         factors = [self.codebooks[i][key[i]] for i in range(len(key))]
         return self.multibind(torch.stack(factors)).to(self.device)
 
-    def __getitem__(self, key: list or tuple, noise = 0.0):
+    def get_vector(self, key: list or tuple, normalize = None, noise = 0.0):
         '''
         `key` is a list of tuples in [(f0, f1, f2, ...), ...] format, or a single tuple
-        fx is the index of the factor in the codebook, which is also its label.
+        fx is the index of the codevector in a codebook, which is also its label.
         '''
+        # By default, software mode doesn't normalize, hardware mode does
+        if normalize == None:
+            normalize = self.mode == "HARDWARE"
+        assert(not (not normalize and self.mode == "HARDWARE"))
+        
         if (type(key) == tuple):
-            return self.apply_noise(self.get_vector(key), noise)
+            return self.apply_noise(self._get_vector(key), noise)
         elif (len(key) == 1):
-            return self.apply_noise(self.get_vector(key[0]), noise)
+            return self.apply_noise(self._get_vector(key[0]), noise)
         else:
-            return self.multiset(torch.stack([self.apply_noise(self.get_vector(key[i]), noise) for i in range(len(key))]))
+            if normalize:
+                # If normalize, apply noise after bundling
+                return self.apply_noise(self.multiset(torch.stack([self._get_vector(key[i]) for i in range(len(key))]), normalize=normalize), noise)
+            else:
+                # Otherwise apply noise to pre-bundled vectors
+                return self.multiset(torch.stack([self.apply_noise(self._get_vector(key[i]), noise) for i in range(len(key))]), normalize=normalize)
 
     def _check_exists(self, file) -> bool:
         return os.path.exists(os.path.join(self.root, file))
@@ -246,7 +255,7 @@ class VSA:
     def _bundle_software(self, input: Tensor, others: Tensor) -> Tensor:
         return torch.add(input, others) 
 
-    def _bundle_hardware(self, input: Tensor, others: Tensor, normalize = True) -> Tensor:
+    def _bundle_hardware(self, input: Tensor, others: Tensor) -> Tensor:
         """
         Bipolarize the values, then add them up.
         """
@@ -255,9 +264,6 @@ class VSA:
         others_as_bipolar = torch.where(others == 0, min_one, others)
 
         result = torch.add(input_as_bipolar, others_as_bipolar)
-        # Binarize. Tie goes to 1 (take the sign bit)
-        if normalize:
-            result = torch.where(result < 0, 0, 1)
         return result
 
     def _multiset_software(self, inputs: Tensor, weights: Tensor = None, normalize=False) -> Tensor:
