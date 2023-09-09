@@ -149,9 +149,9 @@ class Resonator(nn.Module):
             guesses = [None] * len(codebooks)
             for i in range(len(codebooks)):
                 guesses[i] = self.vsa.multiset(codebooks[i], normalize=normalize)
-            init_estimates = torch.stack(guesses)
+            init_estimates = torch.stack(guesses).to(self.device)
         else:
-            init_estimates = self.vsa.multiset(codebooks, normalize=normalize)
+            init_estimates = self.vsa.multiset(codebooks, normalize=normalize).to(self.device)
         
         return init_estimates.unsqueeze(0).repeat(batch_size,1,1)
 
@@ -170,7 +170,7 @@ class Resonator(nn.Module):
         indices = sorted(range(len(orig_codebooks)), key=lambda k: len(orig_codebooks[k]), reverse=True)
         indices = [indices.index(i) for i in range(len(indices))]
         try:
-            codebooks = torch.stack(codebooks)
+            codebooks = torch.stack(codebooks).to(self.device)
         except:
             pass
             
