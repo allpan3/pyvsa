@@ -105,9 +105,8 @@ class VSA:
                 # __getitem__ automatically bundles the vectors when label contain multiple tuples
                 vectors[i] = self.__getitem__(labels[i], noise)
             else:
-                for j in range(num_vectors):
-                    # Intentially not stacked since we want to keep the vectors separate
-                    vectors[i] = [self.__getitem__(labels[i][j], noise) for j in range(num_vectors)]
+                # Intentially not stacked since we want to keep the vectors separate
+                vectors[i] = [self.__getitem__(labels[i][j], noise) for j in range(num_vectors)]
         try: 
             vectors = torch.stack(vectors)
         except:
