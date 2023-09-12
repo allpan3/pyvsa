@@ -66,9 +66,11 @@ class Resonator(nn.Module):
             similarity = self.vsa.similarity(new_estimates, codebooks[i])
             if (activation == 'ABS'):
                 similarity = torch.abs(similarity)
-            elif (activation == 'NONNEG'):
-                similarity[similarity < 0] = 0
-            
+            elif (activation == 'THRESHOLD'):
+                similarity = torch.nn.Threshold(0, 0)(similarity)
+            elif (activation == 'HARDSHRINK'):
+                similarity = torch.nn.Hardshrink(lambd=self.vsa.dim//100)(similarity.type(torch.float32)).type(torch.int64)
+
             # Dot Product with the respective weights and sum
             # Update the estimate in place
             estimates[:,i] = self.vsa.multiset(codebooks[i], similarity, normalize=True)
@@ -121,8 +123,10 @@ class Resonator(nn.Module):
                 similarity[i] = self.vsa.similarity(new_estimates[:,i], codebooks[i]) 
                 if (activation == 'ABS'):
                     similarity[i] = torch.abs(similarity[i])
-                elif (activation == 'NONNEG'):
-                    similarity[i][similarity[i] < 0] = 0
+                elif (activation == 'THRESHOLD'):
+                    similarity[i] = torch.nn.Threshold(0, 0)(similarity[i])
+                elif (activation == 'HARDSHRINK'):
+                    similarity[i] = torch.nn.Hardshrink(lambd=self.vsa.dim//100)(similarity[i].type(torch.float32)).type(torch.int64)
 
                 # Dot Product with the respective weights and sum
                 output[:,i] = self.vsa.multiset(codebooks[i], similarity[i], normalize=True)
@@ -130,8 +134,10 @@ class Resonator(nn.Module):
             similarity = self.vsa.similarity(new_estimates.unsqueeze(-2), codebooks)
             if (activation == 'ABS'):
                 similarity = torch.abs(similarity)
-            elif (activation == 'NONNEG'):
-                similarity[similarity < 0] = 0
+            elif (activation == 'THRESHOLD'):
+                similarity = torch.nn.Threshold(0, 0)(similarity)
+            elif (activation == 'HARDSHRINK'):
+                similarity = torch.nn.Hardshrink(lambd=self.vsa.dim//100)(similarity.type(torch.float32)).type(torch.int64)
 
             # Dot Product with the respective weights and sum
             output = self.vsa.multiset(codebooks, similarity, normalize=True).squeeze(-2)
