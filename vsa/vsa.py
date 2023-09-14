@@ -113,15 +113,16 @@ class VSA:
             pass
         return labels, vectors
 
+    def inverse(self, vector: Tensor):
+        if self.mode == "SOFTWARE":
+            return torch.neg(vector)
+        elif self.mode == "HARDWARE":
+            return 1 - vector
+
     def apply_noise(self, vector, noise):
         indices = [random.random() < noise for i in range(self.dim)]
-        def flip(vector):
-            if self.mode == "SOFTWARE":
-                return -vector
-            elif self.mode == "HARDWARE":
-                return 1 - vector
 
-        vector[indices] = flip(vector[indices])
+        vector[indices] = self.inverse(vector[indices])
         
         return vector.to(self.device)
 

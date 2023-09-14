@@ -40,8 +40,8 @@ class Resonator(nn.Module):
                 estimates = self.resonator_stage_seq(input, estimates, codebooks, self.activation)
             elif (self.resonator_type == "CONCURRENT"):
                 estimates = self.resonator_stage_concur(input, estimates, codebooks, self.activation)
-
-            if all((estimates == old_estimates).flatten().tolist()):
+            # Sometimes RN can enter "bistable" state where estiamtes are flipping polarity every iteration.
+            if all((estimates == old_estimates).flatten().tolist()) or all((self.vsa.inverse(estimates) == old_estimates).flatten().tolist()):
                 break
             old_estimates = estimates.clone()
 
