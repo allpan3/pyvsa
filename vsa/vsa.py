@@ -308,14 +308,36 @@ class VSA:
 
     def _similarity_software(self, input: Tensor, others: Tensor) -> Tensor:
         """Inner product between hypervectors.
+        In software mode vectors can potentially be integers, but we want to project
+        the product to the range [-D, D] so that the similarity range stays the same as bipolar vectors
         Shapes:
-            - input: :math:`(*, d)`
+            - input: :math:`(*, d)`: batch dimension is optional
             - others: :math:`(n, d)` or :math:`(d)`
-            - output: :math:`(*, n)` or :math:`(*)`, depends on shape of others
+            - output: :math:`(*, n)` or :math:`(*)`, depends on shape of others. batch dimension is optional
         """
+    
+        v1_dot = torch.sum(input*input, dim=-1)
+        v1_mag = torch.sqrt(v1_dot)
+        v2_dot = torch.sum(others*others, dim=-1)
+        v2_mag = torch.sqrt(v2_dot)
+        magnitude = v1_mag * v2_mag
+        magnitude = torch.clamp(magnitude, min=1e-08)
+
         if others.dim() >= 2:
             others = others.transpose(-2, -1)
-        return torch.matmul(input.type(torch.float32), others.type(torch.float32))
+        result = torch.matmul(input.type(torch.float32), others.type(torch.float32))
+
+        if result.dim() == 1:
+            if torch.max(torch.abs(result)) > self.dim:
+                result = (result / magnitude * self.dim).type(torch.int64)
+        else:
+            # Process each batch separately
+            for i in range(result.size(0)):
+                if torch.max(torch.abs(result[i])) > self.dim:
+                    result[i] = (result[i] / magnitude * self.dim).type(torch.int64)
+
+        return result
+
 
     def _similarity_hardware(self, input: Tensor, others: Tensor) -> Tensor:
         '''Hamming similarity-like implementation except add -1 when unequal.
