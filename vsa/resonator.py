@@ -8,7 +8,7 @@ from .vsa import VSA
 # %%
 class Resonator(nn.Module):
 
-    def __init__(self, vsa:VSA, type="CONCURRENT", activation='NONE', iterations=100, argmax_abs=True, device="cpu"):
+    def __init__(self, vsa:VSA, type="CONCURRENT", activation='NONE', iterations=100, argmax_abs=True, lambd = 0, stoch : float = None, early_converge:float = None, device="cpu"):
         super(Resonator, self).__init__()
         self.to(device)
 
@@ -18,7 +18,10 @@ class Resonator(nn.Module):
         self.iterations = iterations
         self.activation = activation
         self.argmax_abs = argmax_abs
-
+        self.lamdb = lambd
+        self.stoch = stoch
+        self.early_converge = early_converge
+        
     def forward(self, input, init_estimates, codebooks = None, orig_indices: List[int] = None):
         if codebooks == None:
             codebooks = self.vsa.codebooks
@@ -37,11 +40,23 @@ class Resonator(nn.Module):
         old_estimates = init_estimates.clone()
         for k in range(self.iterations):
             if (self.resonator_type == "SEQUENTIAL"):
-                estimates = self.resonator_stage_seq(input, estimates, codebooks, self.activation)
+                estimates, max_sim = self.resonator_stage_seq(input, estimates, codebooks, self.activation, self.lamdb, self.stoch)
             elif (self.resonator_type == "CONCURRENT"):
-                estimates = self.resonator_stage_concur(input, estimates, codebooks, self.activation)
+                estimates, max_sim = self.resonator_stage_concur(input, estimates, codebooks, self.activation, self.lamdb, self.stoch)
+
+            if (self.early_converge):
+                # TODO we can stop the particular batch if it has been determined to converge, but still can't stop the loop
+                # If the similarity value for any factor exceeds the threshold, stop the loop
+                if all(torch.max(max_sim, dim=-1)[0] > int(self.vsa.dim * self.early_converge)):
+                    break
+                # If the similarity of all factors exceed the treshold, stop the loop
+                # if all(max_sim.flatten() > int(self.vsa.dim * self.early_converge)):
+                #     break
+            # TODO this may not be hardware friendly
+            # Absolute convergence is signified by identical estimates in consecutive iterations
             # Sometimes RN can enter "bistable" state where estiamtes are flipping polarity every iteration.
-            if all((estimates == old_estimates).flatten().tolist()) or all((self.vsa.inverse(estimates) == old_estimates).flatten().tolist()):
+            # This is computationally slow
+            if all((estimates == old_estimates).flatten()) or all((self.vsa.inverse(estimates) == old_estimates).flatten()):
                 break
             old_estimates = estimates.clone()
 
@@ -52,9 +67,18 @@ class Resonator(nn.Module):
                             input: Tensor,
                             estimates: Tensor,
                             codebooks: Tensor or List[Tensor],
-                            activation: Literal['NONE', 'ABS', 'NONNEG'] = 'NONE'):
+                            activation: Literal['NONE', 'ABS', 'NONNEG'] = 'NONE',
+                            lamdb: float = 0,
+                            stoch: float = None):
         
         # Since we only target MAP, inverse of a vector itself
+
+        if input.dim() == 1:
+            b = 1
+        else:
+            b = input.size(0)
+        f = estimates.size(-2)
+        max_sim = torch.empty((b, f), dtype=torch.int64, device=self.vsa.device)
 
         for i in range(estimates.size(-2)):
             # Remove the currently processing factor itself
@@ -64,24 +88,34 @@ class Resonator(nn.Module):
             new_estimates = self.vsa.bind(input, inv_others)
 
             similarity = self.vsa.similarity(new_estimates, codebooks[i])
+
+            # Apply stochasticity
+            if (stoch):
+                similarity += (torch.normal(0, self.vsa.dim, similarity.shape) * stoch).type(torch.int64)
+
             if (activation == 'ABS'):
                 similarity = torch.abs(similarity)
             elif (activation == 'THRESHOLD'):
-                similarity = torch.nn.Threshold(0, 0)(similarity)
+                similarity = torch.nn.Threshold(int(self.vsa.dim * lamdb), 0)(similarity)
             elif (activation == 'HARDSHRINK'):
-                similarity = torch.nn.Hardshrink(lambd=self.vsa.dim//100)(similarity.type(torch.float32)).type(torch.int64)
+                similarity = torch.nn.Hardshrink(lambd=int(self.vsa.dim*lamdb))(similarity.type(torch.float32)).type(torch.int64)
+
 
             # Dot Product with the respective weights and sum
             # Update the estimate in place
             estimates[:,i] = self.vsa.multiset(codebooks[i], similarity, normalize=True)
 
-        return estimates
+            max_sim[:,i] = torch.max(similarity, dim=-1)[0]
+
+        return estimates, max_sim
 
     def resonator_stage_concur(self,
                                input: Tensor,
                                estimates: Tensor,
                                codebooks: Tensor or List[Tensor],
-                               activation: Literal['NONE', 'ABS', 'NONNEG'] = 'NONE'):
+                               activation: Literal['NONE', 'ABS', 'NONNEG'] = 'NONE',
+                               lamdb: float = 0,
+                               stoch: float = None):
         '''
         ARGS:
             input: `(*, d)`. d is dimension (b dim is optional)
@@ -114,39 +148,56 @@ class Resonator(nn.Module):
         new_estimates = self.vsa.bind(input.unsqueeze(-2), inv_others)
 
         if (type(codebooks) == list):
-            # f elements, each is VSATensor of (b, v)
+            # f elements, each is tensor of (b, v)
             similarity = [None] * f 
             # Use int64 to ensure no overflow
-            output = torch.empty((b, f, d), dtype=torch.int64, device=self.vsa.device)
+            output = torch.empty((b, f, d), dtype=torch.int64, device=self.vsa.device) # hmm why do we need int64 here?
+            max_sim = torch.empty((b, f), dtype=torch.int64, device=self.vsa.device)
             for i in range(f):
                 # All batches, the i-th factor compared with the i-th codebook
                 similarity[i] = self.vsa.similarity(new_estimates[:,i], codebooks[i]) 
+
+                # Apply stochasticity
+                if (stoch):
+                    similarity[i] += (torch.normal(0, self.vsa.dim, similarity[i].shape) * stoch).type(torch.int64)
+
                 if (activation == 'ABS'):
                     similarity[i] = torch.abs(similarity[i])
                 elif (activation == 'THRESHOLD'):
-                    similarity[i] = torch.nn.Threshold(0, 0)(similarity[i])
+                    similarity[i] = torch.nn.Threshold(int(self.vsa.dim * lamdb), 0)(similarity[i])
                 elif (activation == 'HARDSHRINK'):
-                    similarity[i] = torch.nn.Hardshrink(lambd=self.vsa.dim//100)(similarity[i].type(torch.float32)).type(torch.int64)
+                    similarity[i] = torch.nn.Hardshrink(lambd=int(self.vsa.dim * lamdb))(similarity[i].type(torch.float32)).type(torch.int64)
 
                 # Dot Product with the respective weights and sum
                 output[:,i] = self.vsa.multiset(codebooks[i], similarity[i], normalize=True)
+
+                max_sim[:,i] = torch.max(similarity[i], dim=-1)[0]
         else:
             similarity = self.vsa.similarity(new_estimates.unsqueeze(-2), codebooks)
+
+            # Apply stochasticity
+            if (stoch):
+                similarity += (torch.normal(0, self.vsa.dim, similarity.shape) * stoch).type(torch.int64)
+
+            # Apply activation
             if (activation == 'ABS'):
                 similarity = torch.abs(similarity)
             elif (activation == 'THRESHOLD'):
-                similarity = torch.nn.Threshold(0, 0)(similarity)
+                similarity = torch.nn.Threshold(int(self.vsa.dim * lamdb), 0)(similarity)
             elif (activation == 'HARDSHRINK'):
-                similarity = torch.nn.Hardshrink(lambd=self.vsa.dim//100)(similarity.type(torch.float32)).type(torch.int64)
-
+                similarity = torch.nn.Hardshrink(lambd=int(self.vsa.dim * lamdb))(similarity.type(torch.float32)).type(torch.int64)
+            
             # Dot Product with the respective weights and sum
             output = self.vsa.multiset(codebooks, similarity, normalize=True).squeeze(-2)
-        
-        return output
 
-    def get_init_estimates(self, codebooks = None, batch_size: int = 1) -> Tensor:
+            max_sim = torch.max(similarity, dim=-1)[0]
+        
+        return output, max_sim
+
+    def get_init_estimates(self, codebooks = None, batch_size: int = 1, normalize = True) -> Tensor:
         """
         Generate the initial estimates as well as reorder codebooks for the resonator network.
+        Seems like initial estimates always benefit from normalization
         """
         if codebooks == None:
             codebooks = self.vsa.codebooks
@@ -158,6 +209,12 @@ class Resonator(nn.Module):
             init_estimates = torch.stack(guesses).to(self.device)
         else:
             init_estimates = self.vsa.multiset(codebooks).to(self.device)
+
+        if (normalize):
+            init_estimates = self.vsa.normalize(init_estimates)
+        
+        # * If we don't normalize We should technically still assign 0 randomly to -1 or 1
+        # * since 0 would erase the similarity (this apply only to software mode)
         
         return init_estimates.unsqueeze(0).repeat(batch_size,1,1)
 
