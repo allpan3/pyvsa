@@ -148,7 +148,7 @@ class Resonator(nn.Module):
         if (type(codebooks) == list):
             # f elements, each is tensor of (b, v)
             similarity = [None] * f
-            output = Tensor.empty(f, d, input.dtype, input.device).repeat(b, 1, 1)
+            output = torch.empty((b, f, d), dtype=input.dtype, device=input.device)
             max_sim = torch.empty((b, f), dtype=torch.int64, device=self.device)
             for i in range(f):
                 # All batches, the i-th factor compared with the i-th codebook
