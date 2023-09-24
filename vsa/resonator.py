@@ -46,16 +46,17 @@ class Resonator(nn.Module):
             if (self.early_converge):
                 # TODO we can stop the particular batch if it has been determined to converge, but still can't stop the loop
                 # If the similarity value for any factor exceeds the threshold, stop the loop
-                if all(torch.max(max_sim, dim=-1)[0] > int(self.vsa.dim * self.early_converge)):
+                if all((torch.max(max_sim, dim=-1)[0] > int(self.vsa.dim * self.early_converge)).tolist()):
                     break
                 # If the similarity of all factors exceed the treshold, stop the loop
-                # if all(max_sim.flatten() > int(self.vsa.dim * self.early_converge)):
+                # if all((max_sim.flatten() > int(self.vsa.dim * self.early_converge)).tolist()):
                 #     break
             # TODO this may not be hardware friendly
             # Absolute convergence is signified by identical estimates in consecutive iterations
             # Sometimes RN can enter "bistable" state where estiamtes are flipping polarity every iteration.
             # This is computationally slow
-            if all((estimates == old_estimates).flatten()) or all((estimates.inverse() == old_estimates).flatten()):
+            # tolist() makes this much faster
+            if all((estimates == old_estimates).flatten().tolist()) or all((estimates.inverse() == old_estimates).flatten().tolist()):
                 break
             old_estimates = estimates.clone()
 

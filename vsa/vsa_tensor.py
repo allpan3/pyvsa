@@ -205,10 +205,10 @@ class VSATensor(Tensor):
 
     def quantized(self):
         if self.mode == "SOFTWARE":
-            return all(torch.logical_or(self == 1, self == -1).flatten())
+            return all(torch.logical_or(self == 1, self == -1).flatten().tolist())
         elif self.mode == "HARDWARE":
             # This should guarantee that the vector is quantized, may need to think closer
-            return all(torch.logical_or(self == 1, self == 0).flatten())
+            return all(torch.logical_or(self == 1, self == 0).flatten().tolist())
 
     def quantize(self):
         if self.mode == "SOFTWARE":
