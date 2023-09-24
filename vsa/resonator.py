@@ -103,7 +103,7 @@ class Resonator(nn.Module):
 
             # Dot Product with the respective weights and sum
             # Update the estimate in place
-            estimates[:,i] = self.vsa.multiset(codebooks[i], similarity, normalize=True)
+            estimates[:,i] = self.vsa.multiset(codebooks[i], similarity, quantize=True)
 
             max_sim[:,i] = torch.max(similarity, dim=-1)[0]
 
@@ -169,7 +169,7 @@ class Resonator(nn.Module):
                     similarity[i] = torch.nn.Hardshrink(lambd=int(self.vsa.dim * lamdb))(similarity[i].type(torch.float32)).type(torch.int64)
 
                 # Dot Product with the respective weights and sum
-                output[:,i] = self.vsa.multiset(codebooks[i], similarity[i], normalize=True)
+                output[:,i] = self.vsa.multiset(codebooks[i], similarity[i], quantize=True)
 
                 max_sim[:,i] = torch.max(similarity[i], dim=-1)[0]
         else:
@@ -188,13 +188,13 @@ class Resonator(nn.Module):
                 similarity = torch.nn.Hardshrink(lambd=int(self.vsa.dim * lamdb))(similarity.type(torch.float32)).type(torch.int64)
             
             # Dot Product with the respective weights and sum
-            output = self.vsa.multiset(codebooks, similarity, normalize=True).squeeze(-2)
+            output = self.vsa.multiset(codebooks, similarity, quantize=True).squeeze(-2)
 
             max_sim = torch.max(similarity, dim=-1)[0]
         
         return output, max_sim
 
-    def get_init_estimates(self, codebooks = None, batch_size: int = 1, normalize = True) -> Tensor:
+    def get_init_estimates(self, codebooks = None, batch_size: int = 1, quantize = True) -> Tensor:
         """
         Generate the initial estimates as well as reorder codebooks for the resonator network.
         Seems like initial estimates always benefit from normalization
@@ -210,10 +210,10 @@ class Resonator(nn.Module):
         else:
             init_estimates = self.vsa.multiset(codebooks).to(self.device)
 
-        if (normalize):
-            init_estimates = self.vsa.normalize(init_estimates)
+        if (quantize):
+            init_estimates = self.vsa.quantize(init_estimates)
         
-        # * If we don't normalize We should technically still assign 0 randomly to -1 or 1
+        # * If we don't quantize We should technically still assign 0 randomly to -1 or 1
         # * since 0 would erase the similarity (this apply only to software mode)
         
         return init_estimates.unsqueeze(0).repeat(batch_size,1,1)

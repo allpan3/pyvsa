@@ -105,7 +105,7 @@ class VSA:
             if bundled:
                 vectors[i] = self.get_vector(labels[i], noise=noise)
             else:
-                # Intentially not stacked since we want to keep the vectors separate
+                # Intentionally not stacked since we want to keep the vectors separate
                 vectors[i] = [self.get_vector(labels[i][j], noise=noise) for j in range(num_vectors)]
         try: 
             vectors = torch.stack(vectors)
@@ -160,27 +160,27 @@ class VSA:
         factors = [self.codebooks[i][key[i]] for i in range(len(key))]
         return self.multibind(torch.stack(factors)).to(self.device)
 
-    def get_vector(self, key: list or tuple, normalize = None, noise = None):
+    def get_vector(self, key: list or tuple, quantize = None, noise = None):
         '''
         `key` is a list of tuples in [(f0, f1, f2, ...), ...] format, or a single tuple
         fx is the index of the codevector in a codebook, which is also its label.
         '''
-        # By default, software mode doesn't normalize, hardware mode does
-        if normalize == None:
-            normalize = self.mode == "HARDWARE"
-        assert(not (not normalize and self.mode == "HARDWARE"))
+        # By default, software mode doesn't quantize, hardware mode does
+        if quantize == None:
+            quantize = self.mode == "HARDWARE"
+        assert(not (not quantize and self.mode == "HARDWARE"))
         
         if (type(key) == tuple):
             return self._get_vector(key) if noise == None else self.apply_noise(self._get_vector(key), noise)
         elif (len(key) == 1):
             return self._get_vector(key[0]) if noise == None else self.apply_noise(self._get_vector(key[0]), noise)
         else:
-            if normalize:
-                # If normalize, apply noise after bundling
-                return self.multiset(torch.stack([self._get_vector(key[i]) for i in range(len(key))]), normalize=normalize) if noise == None else self.apply_noise(self.multiset(torch.stack([self._get_vector(key[i]) for i in range(len(key))]), normalize=normalize), noise)
+            if quantize:
+                # If quantize, apply noise after bundling
+                return self.multiset(torch.stack([self._get_vector(key[i]) for i in range(len(key))]), quantize=quantize) if noise == None else self.apply_noise(self.multiset(torch.stack([self._get_vector(key[i]) for i in range(len(key))]), quantize=quantize), noise)
             else:
                 # Otherwise apply noise to pre-bundled vectors
-                return self.multiset(torch.stack([self._get_vector(key[i]) for i in range(len(key))]), normalize=normalize) if noise == None else self.multiset(torch.stack([self.apply_noise(self._get_vector(key[i]), noise) for i in range(len(key))]), normalize=normalize)
+                return self.multiset(torch.stack([self._get_vector(key[i]) for i in range(len(key))]), quantize=quantize) if noise == None else self.multiset(torch.stack([self.apply_noise(self._get_vector(key[i]), noise) for i in range(len(key))]), quantize=quantize)
 
     def _check_exists(self, file) -> bool:
         return os.path.exists(os.path.join(self.root, file))
@@ -267,7 +267,7 @@ class VSA:
         result = torch.add(input_as_bipolar, others_as_bipolar)
         return result
 
-    def _multiset_software(self, inputs: Tensor, weights: Tensor = None, normalize=False) -> Tensor:
+    def _multiset_software(self, inputs: Tensor, weights: Tensor = None, quantize=False) -> Tensor:
         """Bundle multiple hypervectors"""
         if inputs.dim() < 2:
             raise RuntimeError(
@@ -281,12 +281,12 @@ class VSA:
         else:
             result = torch.sum(inputs, dim=-2, dtype=torch.int64)
         
-        if normalize:
+        if quantize:
             result = torch.where(result < 0, -1, 1).type(inputs.dtype)
         
         return result
     
-    def _multiset_hardware(self, inputs: Tensor, weights: Tensor = None, normalize = True) -> Tensor:
+    def _multiset_hardware(self, inputs: Tensor, weights: Tensor = None, quantize = True) -> Tensor:
         if inputs.dim() < 2:
             raise RuntimeError(
                 f"data needs to have at least two dimensions for multiset, got size: {tuple(inputs.shape)}"
@@ -300,7 +300,7 @@ class VSA:
         else:
             result = torch.sum(inputs_as_bipolar, dim=-2, dtype=torch.int64)
 
-        if normalize:
+        if quantize:
             result = torch.where(result < 0, 0, 1).type(inputs.dtype)
 
         return result
@@ -355,7 +355,7 @@ class VSA:
 
         return torch.sum(bipolar, dim=-1, dtype=torch.int64)
 
-    def normalize(self, input):
+    def quantize(self, input):
         if self.mode == "SOFTWARE":
             positive = torch.tensor(1, dtype=input.dtype, device=input.device)
             negative = torch.tensor(-1, dtype=input.dtype, device=input.device)
