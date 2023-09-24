@@ -1,28 +1,12 @@
-############################################################################################
-# The VSA operation portion is inspired by torchhd library, tailored for our project purpose
-# We use only the MAP model, but with two variants: software and hardware modes.
-# In the software mode, the definitions and operations are exactly the same as MAP model
-# In the hardware mode, the representation is BSC-like, but the operations are still MAP-like.
-# We use binary in place of bipolar whenever possible to reduce the complexity of the hardware,
-# but the bahaviors still closely follow MAP model.
-# For example, we use XNOR for binding to get the exact same input-output mapping. We bipolarize the
-# values in bundle and hamming distance operations to get the same results as MAP model.
-# The original library is located at:
-# https://github.com/hyperdimensional-computing/torchhd.git
-############################################################################################
 
-# %%
 import torch
-from torch import Tensor
 import os.path
 from typing import List, Tuple
-import random
 from typing import Literal
+from .vsa_tensor import VSATensor
+from .functional import *
 
-# %%
 class VSA:
-    # codebooks for each factor
-    codebooks: List[Tensor] or Tensor
 
     def __init__(
             self,
@@ -37,28 +21,12 @@ class VSA:
 
         self.root = root
         self.mode = mode
-        self.device = device
-        # default is float, we may want to use int
-        self.dtype = torch.int8
         self.dim = dim
+        self.device = device
         self.num_factors = num_factors
         self.num_codevectors = num_codevectors
 
-        # Assign functions
-        if (mode == "SOFTWARE"):
-            self.random = self._random_software
-            self.similarity = self._similarity_software
-            self.bind = self._bind_software
-            self.multibind = self._multibind_software
-            self.bundle = self._bundle_software
-            self.multiset = self._multiset_software
-        elif (mode == "HARDWARE"):
-            self.random = self._random_hardware
-            self.similarity = self._similarity_hardware
-            self.bind = self._bind_hardware
-            self.multibind = self._multibind_hardware
-            self.bundle = self._bundle_hardware
-            self.multiset = self._multiset_hardware
+        VSATensor.set_mode(mode)
 
         # Generate codebooks
         if self._check_exists("codebooks.pt"):
@@ -66,67 +34,30 @@ class VSA:
         else:
             self.codebooks = self.gen_codebooks(seed)
 
-
-    def gen_codebooks(self, seed) -> List[Tensor] or Tensor:
+    def gen_codebooks(self, seed) -> List[VSATensor] or VSATensor:
         if seed is not None:
             torch.manual_seed(seed)
         l = []
         # All factors have the same number of vectors
         if (type(self.num_codevectors) == int):
             for i in range(self.num_factors):
-                l.append(self.random(self.num_codevectors, self.dim))
-            l = torch.stack(l).to(self.device)
+                l.append(random(self.num_codevectors, self.dim, device=self.device))
         # Every factor has a different number of vectors
         else:
             for i in range(self.num_factors):
-                l.append(self.random(self.num_codevectors[i], self.dim))
+                l.append(random(self.num_codevectors[i], self.dim, device=self.device))
+
+        try:
+            l = torch.stack(l).to(self.device)
+        except:
+            pass
 
         os.makedirs(self.root, exist_ok=True)
         torch.save(l, os.path.join(self.root, f"codebooks.pt"))
 
         return l
 
-    def sample(self, num_samples, num_factors = None, num_vectors = 1, bundled = True, noise=0.0):
-        '''
-        Generate `num_samples` random samples, each containing `num_vectors` compositional vectors.
-        If `bundled` is True, these vectors are bundled into one, else a list of `num_vectors` are returned.
-        The vector is composed of factors from the first n `num_factors` codebooks if `num_factors` is specified
-        Otherwise it is composed of all available factors
-        '''
-
-        if num_factors == None:
-            num_factors = self.num_factors
-        assert(num_factors <= self.num_factors)
-
-        labels = [None] * num_samples
-        vectors = [[] for _ in range(num_samples)]
-        for i in range(num_samples):
-            labels[i] = [tuple([random.randint(0, len(self.codebooks[i])-1) for i in range(num_factors)]) for j in range(num_vectors)]
-            if bundled:
-                vectors[i] = self.get_vector(labels[i], noise=noise)
-            else:
-                # Intentionally not stacked since we want to keep the vectors separate
-                vectors[i] = [self.get_vector(labels[i][j], noise=noise) for j in range(num_vectors)]
-        try: 
-            vectors = torch.stack(vectors)
-        except:
-            pass
-        return labels, vectors
-
-    def inverse(self, vector: Tensor):
-        if self.mode == "SOFTWARE":
-            return torch.neg(vector)
-        elif self.mode == "HARDWARE":
-            return 1 - vector
-
-    def apply_noise(self, vector, noise):
-        indices = [random.random() < noise for i in range(self.dim)]
-
-        vector[indices] = self.inverse(vector[indices])
-        
-        return vector.to(self.device)
-
-    def cleanup(self, inputs, codebooks = None, abs = True):
+    def cleanup(self, inputs: VSATensor, codebooks: VSATensor or List[VSATensor] = None, abs = True):
         '''
         input: `(b, f, d)` :tensor. b is batch size, f is number of factors, d is dimension
         Return: List[Tuple(int)] of length b
@@ -135,18 +66,18 @@ class VSA:
             codebooks = self.codebooks
         
         if type(codebooks) == list:
-            winners = torch.empty((inputs.size(0), len(codebooks)), dtype=torch.int8, device=self.device)
+            winners = torch.empty((inputs.size(0), len(codebooks)), dtype=torch.int32, device=self.device)
             for i in range(len(codebooks)):
                 if abs:
-                    winners[:,i] = torch.argmax(torch.abs(self.similarity(inputs[:,i], codebooks[i])), -1)
+                    winners[:,i] = torch.argmax(torch.abs(dot_similarity(inputs[:,i], codebooks[i])), -1)
                 else:
-                    winners[:,i] = torch.argmax(self.similarity(inputs[:,i], codebooks[i]), -1)
+                    winners[:,i] = torch.argmax(dot_similarity(inputs[:,i], codebooks[i]), -1)
             return [tuple(winners[i].tolist()) for i in range(winners.size(0))]
         else:
             if abs:
-                winners = torch.argmax(torch.abs(self.similarity(inputs.unsqueeze(-2), codebooks).squeeze(-2)), -1)
+                winners = torch.argmax(torch.abs(dot_similarity(inputs, codebooks)), -1)
             else:
-                winners = torch.argmax(self.similarity(inputs.unsqueeze(-2), codebooks).squeeze(-2), -1)
+                winners = torch.argmax(dot_similarity(inputs, codebooks), -1)
             return [tuple(winners[i].tolist()) for i in range(winners.size(0))]
       
     def _get_vector(self, key:tuple):
@@ -157,209 +88,24 @@ class VSA:
         The vector doesn't need to be composed of all available factors. Only the first n codebooks
         are used when the key length is n.
         '''
-        factors = [self.codebooks[i][key[i]] for i in range(len(key))]
-        return self.multibind(torch.stack(factors)).to(self.device)
+        factors = torch.stack([self.codebooks[i][key[i]] for i in range(len(key))])
+        return multibind(factors).to(self.device)
 
-    def get_vector(self, key: list or tuple, quantize = None, noise = None):
+    def get_vector(self, key: list or tuple, quantize = False):
         '''
         `key` is a list of tuples in [(f0, f1, f2, ...), ...] format, or a single tuple
         fx is the index of the codevector in a codebook, which is also its label.
+        When the key is a list, the vectors are bundled into one vector: whether the bundled the result is quantized 
+        depends on the `quantize` parameter - even if the list size is 1 (single vector)
+        When the key is a tuple, the vector is not bundled hence is automatically quantized.
+
+        Users must be careful not to quantize multiple times when running in hardware mode, which will lead to incorrect results.
         '''
-        # By default, software mode doesn't quantize, hardware mode does
-        if quantize == None:
-            quantize = self.mode == "HARDWARE"
-        assert(not (not quantize and self.mode == "HARDWARE"))
         
         if (type(key) == tuple):
-            return self._get_vector(key) if noise == None else self.apply_noise(self._get_vector(key), noise)
-        elif (len(key) == 1):
-            return self._get_vector(key[0]) if noise == None else self.apply_noise(self._get_vector(key[0]), noise)
+            return self._get_vector(key)
         else:
-            if quantize:
-                # If quantize, apply noise after bundling
-                return self.multiset(torch.stack([self._get_vector(key[i]) for i in range(len(key))]), quantize=quantize) if noise == None else self.apply_noise(self.multiset(torch.stack([self._get_vector(key[i]) for i in range(len(key))]), quantize=quantize), noise)
-            else:
-                # Otherwise apply noise to pre-bundled vectors
-                return self.multiset(torch.stack([self._get_vector(key[i]) for i in range(len(key))]), quantize=quantize) if noise == None else self.multiset(torch.stack([self.apply_noise(self._get_vector(key[i]), noise) for i in range(len(key))]), quantize=quantize)
+            return multiset(torch.stack([self._get_vector(key[i]) for i in range(len(key))]), quantize=quantize)
 
     def _check_exists(self, file) -> bool:
         return os.path.exists(os.path.join(self.root, file))
-
-    def empty(self, num_vectors: int, dimensions: int) -> Tensor:
-        return torch.empty(num_vectors, dimensions, dtype=self.dtype, device=self.device)
-
-    def _random_software(self, num_vectors: int, dimensions: int) -> Tensor:
-        size = (num_vectors, dimensions)
-        select = torch.empty(size, dtype=torch.bool, device=self.device)
-        select.bernoulli_(generator=None)
-
-        result = torch.where(select, -1, +1).to(dtype=self.dtype, device=self.device)
-        return result
-
-    def _random_hardware(self, num_vectors: int, dimensions: int) -> Tensor:
-        size = (num_vectors, dimensions)
-        select = torch.empty(size, dtype=torch.bool, device=self.device)
-        select.bernoulli_(generator=None)
-
-        result = torch.where(select, 0, 1).to(dtype=self.dtype, device=self.device)
-        return result
-
-    def _bind_software(self, input: Tensor, others: Tensor) -> Tensor:
-        return torch.mul(input, others)
-
-    def _bind_hardware(self, input: Tensor, others: Tensor) -> Tensor:
-        """XNOR"""
-        return torch.logical_not(torch.logical_xor(input, others)).to(self.dtype)
-
-    def _multibind_software(self, inputs: Tensor) -> Tensor:
-        """Bind multiple hypervectors"""
-        if inputs.dim() < 2:
-            raise RuntimeError(
-                f"data needs to have at least two dimensions for multibind, got size: {tuple(inputs.shape)}"
-            )
-        return torch.prod(inputs, dim=-2, dtype=inputs.dtype)
-
-    def _multibind_hardware(self, inputs: Tensor) -> Tensor:
-        if inputs.dim() < 2:
-            raise RuntimeError(
-                f"data needs to have at least two dimensions for multibind, got size: {tuple(inputs.shape)}"
-            )
-        
-        def biggest_power_two(n):
-            """Returns the biggest power of two <= n"""
-            # if n is a power of two simply return it
-            if not (n & (n - 1)):
-                return n
-
-            # else set only the most significant bit
-            return int("1" + (len(bin(n)) - 3) * "0", 2)
-
-        n = inputs.size(-2)
-        n_ = biggest_power_two(n)
-        output = inputs[..., :n_, :]
-
-        # parallelize many XORs in a hierarchical manner
-        # for larger batches this is significantly faster
-        while output.size(-2) > 1:
-            output = self.bind(output[..., 0::2, :], output[..., 1::2, :])
-
-        output = output.squeeze(-2)
-
-        # TODO: as an optimization we could also perform the hierarchical XOR
-        # on the leftovers in a recursive fashion
-        leftovers = torch.unbind(inputs[..., n_:, :], -2)
-        for i in range(n - n_):
-            output = self.bind(output, leftovers[i])
-
-        return output.to(inputs.dtype)
-
-    def _bundle_software(self, input: Tensor, others: Tensor) -> Tensor:
-        return torch.add(input, others) 
-
-    def _bundle_hardware(self, input: Tensor, others: Tensor) -> Tensor:
-        """
-        Bipolarize the values, then add them up.
-        """
-        min_one = torch.tensor(-1, dtype=self.dtype, device=self.device)
-        input_as_bipolar = torch.where(input == 0, min_one, input)
-        others_as_bipolar = torch.where(others == 0, min_one, others)
-
-        result = torch.add(input_as_bipolar, others_as_bipolar)
-        return result
-
-    def _multiset_software(self, inputs: Tensor, weights: Tensor = None, quantize=False) -> Tensor:
-        """Bundle multiple hypervectors"""
-        if inputs.dim() < 2:
-            raise RuntimeError(
-                f"data needs to have at least two dimensions for multiset, got size: {tuple(inputs.shape)}"
-            )
-        assert(inputs.size(-2) > 0)
-        # One weight for each vector in inputs
-        if weights != None:
-            assert(inputs.size(-2) == weights.size(-1))
-            result = torch.matmul(weights.type(torch.float32), inputs.type(torch.float32))
-        else:
-            result = torch.sum(inputs, dim=-2, dtype=torch.int64)
-        
-        if quantize:
-            result = torch.where(result < 0, -1, 1).type(inputs.dtype)
-        
-        return result
-    
-    def _multiset_hardware(self, inputs: Tensor, weights: Tensor = None, quantize = True) -> Tensor:
-        if inputs.dim() < 2:
-            raise RuntimeError(
-                f"data needs to have at least two dimensions for multiset, got size: {tuple(inputs.shape)}"
-            )
-        assert(inputs.size(-2) > 0)
-        min_one = torch.tensor(-1, dtype=inputs.dtype, device=inputs.device)
-        inputs_as_bipolar = torch.where(inputs == 0, min_one, inputs) 
-        if weights != None:
-            assert(inputs.size(-2) == weights.size(-1))
-            result = torch.matmul(weights.type(torch.float32), inputs_as_bipolar.type(torch.float32)) 
-        else:
-            result = torch.sum(inputs_as_bipolar, dim=-2, dtype=torch.int64)
-
-        if quantize:
-            result = torch.where(result < 0, 0, 1).type(inputs.dtype)
-
-        return result
-
-
-    def _similarity_software(self, input: Tensor, others: Tensor) -> Tensor:
-        """Inner product between hypervectors.
-        In software mode vectors can potentially be integers, but we want to project
-        the product to the range [-D, D] so that the similarity range stays the same as bipolar vectors
-        Shapes:
-            - input: :math:`(*, d)`: batch dimension is optional
-            - others: :math:`(n, d)` or :math:`(d)`
-            - output: :math:`(*, n)` or :math:`(*)`, depends on shape of others. batch dimension is optional
-        """
-    
-        v1_dot = torch.sum(input*input, dim=-1)
-        v1_mag = torch.sqrt(v1_dot)
-        v2_dot = torch.sum(others*others, dim=-1)
-        v2_mag = torch.sqrt(v2_dot)
-        magnitude = v1_mag * v2_mag
-        magnitude = torch.clamp(magnitude, min=1e-08)
-
-        if others.dim() >= 2:
-            others = others.transpose(-2, -1)
-        result = torch.matmul(input.type(torch.float32), others.type(torch.float32))
-
-        if result.dim() == 1:
-            if torch.max(torch.abs(result)) > self.dim:
-                result = (result / magnitude * self.dim).type(torch.int64)
-        else:
-            # Process each batch separately
-            for i in range(result.size(0)):
-                if torch.max(torch.abs(result[i])) > self.dim:
-                    result[i] = (result[i] / magnitude * self.dim).type(torch.int64)
-
-        return result
-
-
-    def _similarity_hardware(self, input: Tensor, others: Tensor) -> Tensor:
-        '''Hamming similarity-like implementation except add -1 when unequal.
-           The result is exactly the same as dot product. Since vectors are expected
-           to be binary, matmul is not required.
-        Shapes:
-            - input: :math:`(*, d)`
-            - others: :math:`(n, d)` or :math:`(d)`
-            - output: :math:`(*, n)` or :math:`(*)`, depends on shape of others
-        '''
-        if input.dim() > 1 and others.dim() > 1:
-            bipolar = torch.where(input.unsqueeze(-2) == others.unsqueeze(-3), 1, -1)
-        else:
-            bipolar = torch.where(input == others, 1, -1)
-
-        return torch.sum(bipolar, dim=-1, dtype=torch.int64)
-
-    def quantize(self, input):
-        if self.mode == "SOFTWARE":
-            positive = torch.tensor(1, dtype=input.dtype, device=input.device)
-            negative = torch.tensor(-1, dtype=input.dtype, device=input.device)
-        elif self.mode == "HARDWARE":
-            positive = torch.tensor(1, dtype=input.dtype, device=input.device)
-            negative = torch.tensor(0, dtype=input.dtype, device=input.device)
-        return torch.where(input >= 0, positive, negative)
