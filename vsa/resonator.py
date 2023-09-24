@@ -1,9 +1,8 @@
 import torch.nn as nn
 import torch
+from torch import Tensor
 from typing import Literal, List
 from .vsa import VSA
-from .vsa_tensor import VSATensor
-from .functional import multiset, dot_similarity, bind, multibind
 
 class Resonator(nn.Module):
 
@@ -21,7 +20,7 @@ class Resonator(nn.Module):
         self.stoch = stoch
         self.early_converge = early_converge
         
-    def forward(self, input: VSATensor, init_estimates: VSATensor, codebooks = None, orig_indices: List[int] = None):
+    def forward(self, input: Tensor, init_estimates: Tensor, codebooks = None, orig_indices: List[int] = None):
         if codebooks == None:
             codebooks = self.vsa.codebooks
         estimates, convergence = self.resonator_network(input, init_estimates, codebooks)
@@ -33,7 +32,7 @@ class Resonator(nn.Module):
 
         return outcome, convergence
 
-    def resonator_network(self, input: VSATensor, init_estimates: VSATensor, codebooks: VSATensor or List[VSATensor]):
+    def resonator_network(self, input: Tensor, init_estimates: Tensor, codebooks: Tensor or List[Tensor]):
         # Must clone, otherwise the original init_estiamtes will be modified
         estimates = init_estimates.clone()
         old_estimates = init_estimates.clone()
@@ -55,8 +54,7 @@ class Resonator(nn.Module):
             # Absolute convergence is signified by identical estimates in consecutive iterations
             # Sometimes RN can enter "bistable" state where estiamtes are flipping polarity every iteration.
             # This is computationally slow
-            # tolist() makes this much faster
-            if all((estimates == old_estimates).flatten().tolist()) or all((estimates.inverse() == old_estimates).flatten().tolist()):
+            if all((estimates == old_estimates).flatten().tolist()) or all((VSA.inverse(estimates) == old_estimates).flatten().tolist()):
                 break
             old_estimates = estimates.clone()
 
@@ -64,12 +62,12 @@ class Resonator(nn.Module):
 
 
     def resonator_stage_seq(self,
-                            input: VSATensor,
-                            estimates: VSATensor,
-                            codebooks: VSATensor or List[VSATensor],
+                            input: Tensor,
+                            estimates: Tensor,
+                            codebooks: Tensor or List[Tensor],
                             activation: Literal['NONE', 'ABS', 'NONNEG'] = 'NONE',
                             lamdb: float = 0,
-                            stoch: float = None) -> VSATensor:
+                            stoch: float = None) -> Tensor:
         
         # Since we only target MAP, inverse of a vector itself
 
@@ -84,10 +82,10 @@ class Resonator(nn.Module):
             # Remove the currently processing factor itself
             rolled = estimates.roll(-i, -2)
             inv_estimates = torch.stack([rolled[j][1:] for j in range(estimates.size(0))])
-            inv_others = multibind(inv_estimates)
-            new_estimates = bind(input, inv_others)
+            inv_others = VSA.multibind(inv_estimates)
+            new_estimates = VSA.bind(input, inv_others)
 
-            similarity = dot_similarity(new_estimates, codebooks[i])
+            similarity = VSA.dot_similarity(new_estimates, codebooks[i])
 
             # Apply stochasticity
             if (stoch):
@@ -103,19 +101,19 @@ class Resonator(nn.Module):
 
             # Dot Product with the respective weights and sum
             # Update the estimate in place
-            estimates[:,i] = multiset(codebooks[i], similarity, quantize=True)
+            estimates[:,i] = VSA.multiset(codebooks[i], similarity, quantize=True)
 
             max_sim[:,i] = torch.max(similarity, dim=-1)[0]
 
         return estimates, max_sim
 
     def resonator_stage_concur(self,
-                               input: VSATensor,
-                               estimates: VSATensor,
-                               codebooks: VSATensor or List[VSATensor],
+                               input: Tensor,
+                               estimates: Tensor,
+                               codebooks: Tensor or List[Tensor],
                                activation: Literal['NONE', 'ABS', 'NONNEG'] = 'NONE',
                                lamdb: float = 0,
-                               stoch: float = None) -> VSATensor:
+                               stoch: float = None) -> Tensor:
         '''
         ARGS:
             input: `(b*, d)`. d is dimension (b dim is optional)
@@ -142,19 +140,19 @@ class Resonator(nn.Module):
         estimates = torch.stack(rolled, dim=-2)
 
         # First bind all the other estimates together: z * y, x * z, y * z
-        inv_others = multibind(estimates)
+        inv_others = VSA.multibind(estimates)
 
         # Then unbind all other estimates from the input: s * (x * y), s * (x * z), s * (y * z)
-        new_estimates = bind(input.unsqueeze(-2), inv_others)
+        new_estimates = VSA.bind(input.unsqueeze(-2), inv_others)
 
         if (type(codebooks) == list):
             # f elements, each is tensor of (b, v)
             similarity = [None] * f
-            output = VSATensor.empty(f, d, input.dtype, input.device).repeat(b, 1, 1)
+            output = Tensor.empty(f, d, input.dtype, input.device).repeat(b, 1, 1)
             max_sim = torch.empty((b, f), dtype=torch.int64, device=self.device)
             for i in range(f):
                 # All batches, the i-th factor compared with the i-th codebook
-                similarity[i] = dot_similarity(new_estimates[:,i], codebooks[i]) 
+                similarity[i] = VSA.dot_similarity(new_estimates[:,i], codebooks[i]) 
 
                 # Apply stochasticity
                 if (stoch):
@@ -168,11 +166,11 @@ class Resonator(nn.Module):
                     similarity[i] = torch.nn.Hardshrink(lambd=int(self.vsa.dim * lamdb))(similarity[i].type(torch.float32)).type(torch.int64)
 
                 # Dot Product with the respective weights and sum
-                output[:,i] = multiset(codebooks[i], similarity[i], quantize=True)
+                output[:,i] = VSA.multiset(codebooks[i], similarity[i], quantize=True)
 
                 max_sim[:,i] = torch.max(similarity[i], dim=-1)[0]
         else:
-            similarity = dot_similarity(new_estimates, codebooks)
+            similarity = VSA.dot_similarity(new_estimates, codebooks)
 
             # Apply stochasticity
             if (stoch):
@@ -187,13 +185,13 @@ class Resonator(nn.Module):
                 similarity = torch.nn.Hardshrink(lambd=int(self.vsa.dim * lamdb))(similarity.type(torch.float32)).type(torch.int64)
             
             # Dot Product with the respective weights and sum
-            output = multiset(codebooks, similarity, quantize=True)
+            output = VSA.multiset(codebooks, similarity, quantize=True)
 
             max_sim = torch.max(similarity, dim=-1)[0]
         
         return output, max_sim
 
-    def get_init_estimates(self, codebooks = None, quantize = True) -> VSATensor:
+    def get_init_estimates(self, codebooks = None, quantize = True) -> Tensor:
         """
         Generate the initial estimates as well as reorder codebooks for the resonator network.
         Seems like initial estimates always benefit from normalization
@@ -204,20 +202,20 @@ class Resonator(nn.Module):
         if (type(codebooks) == list):
             guesses = [None] * len(codebooks)
             for i in range(len(codebooks)):
-                guesses[i] = multiset(codebooks[i])
+                guesses[i] = VSA.multiset(codebooks[i])
             init_estimates = torch.stack(guesses)
         else:
-            init_estimates = multiset(codebooks)
+            init_estimates = VSA.multiset(codebooks)
 
         if (quantize):
-            init_estimates = init_estimates.quantize()
+            init_estimates = VSA.quantize(init_estimates)
         
         # * If we don't quantize We should technically still assign 0 randomly to -1 or 1
         # * since 0 would erase the similarity (this apply only to software mode)
         
-        return init_estimates.unsqueeze(0)
+        return init_estimates
 
-    def reorder_codebooks(self, orig_codebooks: List[VSATensor] or VSATensor = None) -> (List[VSATensor] or VSATensor, List[int]):
+    def reorder_codebooks(self, orig_codebooks: List[Tensor] or Tensor = None) -> (List[Tensor] or Tensor, List[int]):
         """
         RETURNS:
             codebooks: reordered codebooks
@@ -237,5 +235,3 @@ class Resonator(nn.Module):
             pass
             
         return codebooks, indices
-
-# %%
