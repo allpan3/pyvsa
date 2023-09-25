@@ -35,13 +35,8 @@ class Resonator(nn.Module):
         # Pre-generate a set of noise tensors
         if self.mode == "HARDWARE":
             if (self.stoch == "SIMILARITY"):
-                Resonator.noise = [(torch.normal(0, self.vsa.dim, (codebooks[i].size(0),)) * self.randomness).type(torch.int64) for j in range(200) for i in range(len(codebooks))]
-                try:
-                    Resonator.noise = torch.stack(Resonator.noise)
-                except:
-                    Resonator.noise = deque(Resonator.noise)
-
-                assert(len(Resonator.noise) > len(codebooks))
+                Resonator.noise = (torch.normal(0, self.vsa.dim, (300,)) * self.randomness).type(torch.int64)
+                assert(len(Resonator.noise) > sum([codebooks[i].size(0) for i in range(len(codebooks))]))
 
             elif (self.stoch == "VECTOR"):
                 Resonator.noise = torch.rand(51, self.vsa.dim) < self.randomness
@@ -129,11 +124,8 @@ class Resonator(nn.Module):
                 if (self.mode == "SOFTWARE"):
                     similarity += (torch.normal(0, self.vsa.dim, similarity.shape) * randomness).type(torch.int64)
                 elif (self.mode == "HARDWARE"):
-                    similarity += Resonator.noise[0]
-                    if (type(Resonator.noise) is Tensor):
-                        Resonator.noise = Resonator.noise.roll(-1, -2)
-                    else:
-                        Resonator.noise.rotate(-1)
+                    similarity += Resonator.noise[0:_codebook.size(0)]
+                    Resonator.noise = Resonator.noise.roll(-_codebook.size(0), -1)
 
             if (activation == 'ABS'):
                 similarity = torch.abs(similarity)
@@ -216,8 +208,8 @@ class Resonator(nn.Module):
                     if (self.mode == "SOFTWARE"):
                         similarity[i] += (torch.normal(0, self.vsa.dim, similarity[i].shape) * randomness).type(torch.int64)
                     elif (self.mode == "HARDWARE"):
-                        similarity[i] += Resonator.noise[0]
-                        Resonator.noise.rotate(-1)
+                        similarity[i] += Resonator.noise[0:_codebooks[i].size(0)]
+                        Resonator.noise = Resonator.noise.roll(-_codebooks[i].size(0), -1)
 
                 if (activation == 'ABS'):
                     similarity[i] = torch.abs(similarity[i])
@@ -238,11 +230,8 @@ class Resonator(nn.Module):
                 if (self.mode == "SOFTWARE"):
                     similarity += (torch.normal(0, self.vsa.dim, similarity.shape) * randomness).type(torch.int64)
                 elif (self.mode == "HARDWARE"):
-                    similarity += Resonator.noise[0:f]
-                    if (type(Resonator.noise) is Tensor):
-                        Resonator.noise = Resonator.noise.roll(-f, -2)
-                    else:
-                        Resonator.noise.rotate(-f)
+                    similarity += Resonator.noise[0:_codebooks.size(1)*f].view(f, _codebooks.size(1))
+                    Resonator.noise = Resonator.noise.roll(-_codebooks.size(1)*f, -1)
 
             # Apply activation
             if (activation == 'ABS'):

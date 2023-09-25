@@ -73,6 +73,7 @@ class VSA:
         '''
         input: `(b, f, d)` :tensor. b is batch size, f is number of factors, d is dimension
         Return: List[Tuple(int)] of length b
+        `inputs` must be quantized
         '''
         if codebooks == None:
             codebooks = self.codebooks
@@ -319,8 +320,17 @@ class VSA:
     
     @classmethod
     def is_quantized(cls, input: Tensor) -> bool:
+        """For hardware mode, this function may not work correctly because an expanded vector
+           may potentially be all 0's and 1's, especially if it underwent subtraction"""
         if cls.mode == "SOFTWARE":
-            return all(torch.logical_or(input == 1, input == -1).flatten())
+            return all(torch.logical_or(input == 1, input == -1).flatten().tolist())
         elif cls.mode == "HARDWARE":
-            # This should guarantee that the vector is quantized, may need to think closer
-            return all(torch.logical_or(input == 1, input == 0).flatten())
+            return all(torch.logical_or(input == 1, input == 0).flatten().tolist())
+
+    @classmethod
+    def energy(cls, input: Tensor) -> Tensor:
+        """
+        The energy in the vector is indicated by the number of non-zero elements
+        `input` is expected to be an expanded (unquantized) vector
+        """
+        return torch.sum(torch.where(input == 0, 0, 1), dim=-1)
