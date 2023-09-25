@@ -11,7 +11,7 @@ class Resonator(nn.Module):
     noise = None
     mode : Literal["SOFTWARE", "HARDWARE"] = None
 
-    def __init__(self, vsa:VSA, mode: Literal["SOFTWARE", "HARDWARE"], type="CONCURRENT", activation='NONE', iterations=100, argmax_abs=True, lambd = 0, stoch : float = None, early_converge:float = None, device="cpu"):
+    def __init__(self, vsa:VSA, mode: Literal["SOFTWARE", "HARDWARE"], type="CONCURRENT", activation='NONE', iterations=100, argmax_abs=True, lambd = 0, stoch = "NONE", randomness : float = 0.0, early_converge:float = None, device="cpu"):
         super(Resonator, self).__init__()
         self.to(device)
         
@@ -22,21 +22,33 @@ class Resonator(nn.Module):
         self.iterations = iterations
         self.activation = activation
         self.argmax_abs = argmax_abs
-        self.lamdb = lambd
+        self.lambd = lambd
         self.stoch = stoch
+        self.randomness = randomness
         self.early_converge = early_converge
 
-        # Pre-generate a set of noise tensors
-        if (stoch):
-            Resonator.noise = [(torch.normal(0, self.vsa.dim, (self.vsa.codebooks[i].size(0),)) * stoch).type(torch.int64) for j in range(20) for i in range(len(self.vsa.codebooks))]
-            try:
-                Resonator.noise = torch.stack(Resonator.noise)
-            except:
-                Resonator.noise = deque(Resonator.noise)
-        
+
     def forward(self, input: Tensor, init_estimates: Tensor, codebooks = None, orig_indices: List[int] = None):
         if codebooks == None:
             codebooks = self.vsa.codebooks
+
+        # Pre-generate a set of noise tensors
+        if self.mode == "HARDWARE":
+            if (self.stoch == "SIMILARITY"):
+                Resonator.noise = [(torch.normal(0, self.vsa.dim, (codebooks[i].size(0),)) * self.randomness).type(torch.int64) for j in range(200) for i in range(len(codebooks))]
+                try:
+                    Resonator.noise = torch.stack(Resonator.noise)
+                except:
+                    Resonator.noise = deque(Resonator.noise)
+
+                assert(len(Resonator.noise) > len(codebooks))
+
+            elif (self.stoch == "VECTOR"):
+                Resonator.noise = torch.rand(51, self.vsa.dim) < self.randomness
+                # To mimic hardware, retrict the number of noise vectors we store in memory. The more we store the closer it is to a true random model.
+                # The minimum required is the number of codevectors in the longest codebook so that in each iteration each codevector is applied with different noise
+                assert(Resonator.noise.size(0) >= max([len(codebooks[i]) for i in range(len(codebooks))]))
+
         estimates, convergence = self.resonator_network(input, init_estimates, codebooks)
         # outcome: the indices of the codevectors in the codebooks
         outcome = self.vsa.cleanup(estimates, codebooks, self.argmax_abs)
@@ -52,9 +64,9 @@ class Resonator(nn.Module):
         old_estimates = init_estimates.clone()
         for k in range(self.iterations):
             if (self.resonator_type == "SEQUENTIAL"):
-                estimates, max_sim = self.resonator_stage_seq(input, estimates, codebooks, self.activation, self.lamdb, self.stoch)
+                estimates, max_sim = self.resonator_stage_seq(input, estimates, codebooks, self.activation, self.lambd, self.stoch, self.randomness)
             elif (self.resonator_type == "CONCURRENT"):
-                estimates, max_sim = self.resonator_stage_concur(input, estimates, codebooks, self.activation, self.lamdb, self.stoch)
+                estimates, max_sim = self.resonator_stage_concur(input, estimates, codebooks, self.activation, self.lambd, self.stoch, self.randomness)
 
             if (self.early_converge):
                 # If the similarity value for any factor exceeds the threshold, stop the loop
@@ -78,9 +90,10 @@ class Resonator(nn.Module):
                             input: Tensor,
                             estimates: Tensor,
                             codebooks: Tensor or List[Tensor],
-                            activation: Literal['NONE', 'ABS', 'NONNEG'] = 'NONE',
-                            lamdb: float = 0,
-                            stoch: float = None) -> Tensor:
+                            activation = 'IDENTITY',
+                            lambd: float = 0,
+                            stoch = "NONE", 
+                            randomness: float = 0.0) -> Tensor:
         
         # Since we only target MAP, inverse of a vector itself
 
@@ -98,12 +111,23 @@ class Resonator(nn.Module):
             inv_others = VSA.multibind(inv_estimates)
             new_estimates = VSA.bind(input, inv_others)
 
-            similarity = VSA.dot_similarity(new_estimates, codebooks[i])
+            _codebook = codebooks[i]
+            # Apply to codebook vectors (want to apply different noise for each estimate-codevector comparison, this is easier to code)
+            if (stoch == "VECTOR"):
+                _codebook = _codebook.clone()
+                if (self.mode == "SOFTWARE"):
+                    indices = torch.rand(_codebook.shape) < randomness
+                    _codebook[indices] = VSA.inverse(_codebook[indices])
+                elif (self.mode == "HARDWARE"):
+                    _codebook[Resonator.noise[0:_codebook.size(0)]] = VSA.inverse(_codebook[Resonator.noise[0:_codebook.size(0)]])
+                    Resonator.noise = Resonator.noise.roll(-_codebook.size(0), 0)
+
+            similarity = VSA.dot_similarity(new_estimates, _codebook)
 
             # Apply stochasticity
-            if (stoch):
+            if (stoch == "SIMILARITY"):
                 if (self.mode == "SOFTWARE"):
-                    similarity += (torch.normal(0, self.vsa.dim, similarity.shape) * stoch).type(torch.int64)
+                    similarity += (torch.normal(0, self.vsa.dim, similarity.shape) * randomness).type(torch.int64)
                 elif (self.mode == "HARDWARE"):
                     similarity += Resonator.noise[0]
                     if (type(Resonator.noise) is Tensor):
@@ -114,9 +138,9 @@ class Resonator(nn.Module):
             if (activation == 'ABS'):
                 similarity = torch.abs(similarity)
             elif (activation == 'THRESHOLD'):
-                similarity = torch.nn.Threshold(int(self.vsa.dim * lamdb), 0)(similarity)
+                similarity = torch.nn.Threshold(int(self.vsa.dim * lambd), 0)(similarity)
             elif (activation == 'HARDSHRINK'):
-                similarity = torch.nn.Hardshrink(lambd=int(self.vsa.dim*lamdb))(similarity.type(torch.float32)).type(torch.int64)
+                similarity = torch.nn.Hardshrink(lambd=int(self.vsa.dim*lambd))(similarity.type(torch.float32)).type(torch.int64)
 
 
             # Dot Product with the respective weights and sum
@@ -131,9 +155,10 @@ class Resonator(nn.Module):
                                input: Tensor,
                                estimates: Tensor,
                                codebooks: Tensor or List[Tensor],
-                               activation: Literal['NONE', 'ABS', 'NONNEG'] = 'NONE',
-                               lamdb: float = 0,
-                               stoch: float = None) -> Tensor:
+                               activation = "IDENTITY",
+                               lambd: float = 0,
+                               stoch = "NONE",
+                               randomness: float = 0.0) -> Tensor:
         '''
         ARGS:
             input: `(b*, d)`. d is dimension (b dim is optional)
@@ -165,9 +190,17 @@ class Resonator(nn.Module):
         # Then unbind all other estimates from the input: s * (x * y), s * (x * z), s * (y * z)
         new_estimates = VSA.bind(input.unsqueeze(-2), inv_others)
 
-        # if (stoch):
-        #     indices = [random.random() < stoch for i in range(d)] 
-        #     new_estimates[:,:, indices] = VSA.inverse(new_estimates[:,:, indices])
+        _codebooks = codebooks
+        # Apply to codebook vectors (want to apply different noise for each estimate-codevector comparison, this is easier to code)
+        if (stoch == "VECTOR"):
+            _codebooks = _codebooks.clone()
+            for i in range(f):
+                if (self.mode == "SOFTWARE"):
+                    indices = torch.rand(_codebooks[i].shape) < randomness
+                    _codebooks[i][indices] = VSA.inverse(_codebooks[i][indices])
+                elif (self.mode == "HARDWARE"):
+                    _codebooks[i][Resonator.noise[0:_codebooks[i].size(0)]] = VSA.inverse(_codebooks[i][Resonator.noise[0:_codebooks[i].size(0)]])
+                    Resonator.noise = Resonator.noise.roll(-_codebooks[i].size(0), 0)
 
         if (type(codebooks) == list):
             # f elements, each is tensor of (b, v)
@@ -176,12 +209,12 @@ class Resonator(nn.Module):
             max_sim = torch.empty((b, f), dtype=torch.int64, device=self.device)
             for i in range(f):
                 # All batches, the i-th factor compared with the i-th codebook
-                similarity[i] = VSA.dot_similarity(new_estimates[:,i], codebooks[i]) 
+                similarity[i] = VSA.dot_similarity(new_estimates[:,i], _codebooks[i]) 
 
                 # Apply stochasticity
-                if (stoch):
+                if (stoch == "SIMILARITY"):
                     if (self.mode == "SOFTWARE"):
-                        similarity[i] += (torch.normal(0, self.vsa.dim, similarity[i].shape) * stoch).type(torch.int64)
+                        similarity[i] += (torch.normal(0, self.vsa.dim, similarity[i].shape) * randomness).type(torch.int64)
                     elif (self.mode == "HARDWARE"):
                         similarity[i] += Resonator.noise[0]
                         Resonator.noise.rotate(-1)
@@ -189,21 +222,21 @@ class Resonator(nn.Module):
                 if (activation == 'ABS'):
                     similarity[i] = torch.abs(similarity[i])
                 elif (activation == 'THRESHOLD'):
-                    similarity[i] = torch.nn.Threshold(int(self.vsa.dim * lamdb), 0)(similarity[i])
+                    similarity[i] = torch.nn.Threshold(int(self.vsa.dim * lambd), 0)(similarity[i])
                 elif (activation == 'HARDSHRINK'):
-                    similarity[i] = torch.nn.Hardshrink(lambd=int(self.vsa.dim * lamdb))(similarity[i].type(torch.float32)).type(torch.int64)
+                    similarity[i] = torch.nn.Hardshrink(lambd=int(self.vsa.dim * lambd))(similarity[i].type(torch.float32)).type(torch.int64)
 
                 # Dot Product with the respective weights and sum
                 output[:,i] = VSA.multiset(codebooks[i], similarity[i], quantize=True)
 
                 max_sim[:,i] = torch.max(similarity[i], dim=-1)[0]
         else:
-            similarity = VSA.dot_similarity(new_estimates, codebooks)
+            similarity = VSA.dot_similarity(new_estimates, _codebooks)
 
             # Apply stochasticity
-            if (stoch):
+            if (stoch == "SIMILARITY"):
                 if (self.mode == "SOFTWARE"):
-                    similarity += (torch.normal(0, self.vsa.dim, similarity.shape) * stoch).type(torch.int64)
+                    similarity += (torch.normal(0, self.vsa.dim, similarity.shape) * randomness).type(torch.int64)
                 elif (self.mode == "HARDWARE"):
                     similarity += Resonator.noise[0:f]
                     if (type(Resonator.noise) is Tensor):
@@ -211,14 +244,13 @@ class Resonator(nn.Module):
                     else:
                         Resonator.noise.rotate(-f)
 
-
             # Apply activation
             if (activation == 'ABS'):
                 similarity = torch.abs(similarity)
             elif (activation == 'THRESHOLD'):
-                similarity = torch.nn.Threshold(int(self.vsa.dim * lamdb), 0)(similarity)
+                similarity = torch.nn.Threshold(int(self.vsa.dim * lambd), 0)(similarity)
             elif (activation == 'HARDSHRINK'):
-                similarity = torch.nn.Hardshrink(lambd=int(self.vsa.dim * lamdb))(similarity.type(torch.float32)).type(torch.int64)
+                similarity = torch.nn.Hardshrink(lambd=int(self.vsa.dim * lambd))(similarity.type(torch.float32)).type(torch.int64)
             
             # Dot Product with the respective weights and sum
             output = VSA.multiset(codebooks, similarity, quantize=True)
