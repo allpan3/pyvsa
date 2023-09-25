@@ -3,13 +3,19 @@ import torch
 from torch import Tensor
 from typing import Literal, List
 from .vsa import VSA
+import random
+from collections import deque
 
 class Resonator(nn.Module):
 
-    def __init__(self, vsa:VSA, type="CONCURRENT", activation='NONE', iterations=100, argmax_abs=True, lambd = 0, stoch : float = None, early_converge:float = None, device="cpu"):
+    noise = None
+    mode : Literal["SOFTWARE", "HARDWARE"] = None
+
+    def __init__(self, vsa:VSA, mode: Literal["SOFTWARE", "HARDWARE"], type="CONCURRENT", activation='NONE', iterations=100, argmax_abs=True, lambd = 0, stoch : float = None, early_converge:float = None, device="cpu"):
         super(Resonator, self).__init__()
         self.to(device)
-
+        
+        Resonator.mode = mode
         self.vsa = vsa
         self.device = device
         self.resonator_type = type
@@ -19,6 +25,14 @@ class Resonator(nn.Module):
         self.lamdb = lambd
         self.stoch = stoch
         self.early_converge = early_converge
+
+        # Pre-generate a set of noise tensors
+        if (stoch):
+            Resonator.noise = [(torch.normal(0, self.vsa.dim, (self.vsa.codebooks[i].size(0),)) * stoch).type(torch.int64) for j in range(20) for i in range(len(self.vsa.codebooks))]
+            try:
+                Resonator.noise = torch.stack(Resonator.noise)
+            except:
+                Resonator.noise = deque(Resonator.noise)
         
     def forward(self, input: Tensor, init_estimates: Tensor, codebooks = None, orig_indices: List[int] = None):
         if codebooks == None:
@@ -43,21 +57,20 @@ class Resonator(nn.Module):
                 estimates, max_sim = self.resonator_stage_concur(input, estimates, codebooks, self.activation, self.lamdb, self.stoch)
 
             if (self.early_converge):
-                # TODO we can stop the particular batch if it has been determined to converge, but still can't stop the loop
                 # If the similarity value for any factor exceeds the threshold, stop the loop
                 if all((torch.max(max_sim, dim=-1)[0] > int(self.vsa.dim * self.early_converge)).tolist()):
                     break
                 # If the similarity of all factors exceed the treshold, stop the loop
                 # if all((max_sim.flatten() > int(self.vsa.dim * self.early_converge)).tolist()):
                 #     break
-            # TODO this may not be hardware friendly
             # Absolute convergence is signified by identical estimates in consecutive iterations
             # Sometimes RN can enter "bistable" state where estiamtes are flipping polarity every iteration.
-            # This is computationally slow
+            # This is computationally slow. tolist() before all() makes it a lot faster
             if all((estimates == old_estimates).flatten().tolist()) or all((VSA.inverse(estimates) == old_estimates).flatten().tolist()):
                 break
             old_estimates = estimates.clone()
-
+        # TODO we can stop iteration count for a particular batch if it has been determined to converge, but still can't stop the loop
+        # That way we can get more accurate iteration count
         return estimates, k 
 
 
@@ -76,7 +89,7 @@ class Resonator(nn.Module):
         else:
             b = input.size(0)
         f = estimates.size(-2)
-        max_sim = torch.empty((b, f), dtype=torch.int64, device=self.vsa.device)
+        max_sim = torch.empty((b, f), dtype=torch.int64, device=self.device)
 
         for i in range(estimates.size(-2)):
             # Remove the currently processing factor itself
@@ -89,7 +102,14 @@ class Resonator(nn.Module):
 
             # Apply stochasticity
             if (stoch):
-                similarity += (torch.normal(0, self.vsa.dim, similarity.shape) * stoch).type(torch.int64)
+                if (self.mode == "SOFTWARE"):
+                    similarity += (torch.normal(0, self.vsa.dim, similarity.shape) * stoch).type(torch.int64)
+                elif (self.mode == "HARDWARE"):
+                    similarity += Resonator.noise[0]
+                    if (type(Resonator.noise) is Tensor):
+                        Resonator.noise = Resonator.noise.roll(-1, -2)
+                    else:
+                        Resonator.noise.rotate(-1)
 
             if (activation == 'ABS'):
                 similarity = torch.abs(similarity)
@@ -145,6 +165,10 @@ class Resonator(nn.Module):
         # Then unbind all other estimates from the input: s * (x * y), s * (x * z), s * (y * z)
         new_estimates = VSA.bind(input.unsqueeze(-2), inv_others)
 
+        # if (stoch):
+        #     indices = [random.random() < stoch for i in range(d)] 
+        #     new_estimates[:,:, indices] = VSA.inverse(new_estimates[:,:, indices])
+
         if (type(codebooks) == list):
             # f elements, each is tensor of (b, v)
             similarity = [None] * f
@@ -156,7 +180,11 @@ class Resonator(nn.Module):
 
                 # Apply stochasticity
                 if (stoch):
-                    similarity[i] += (torch.normal(0, self.vsa.dim, similarity[i].shape) * stoch).type(torch.int64)
+                    if (self.mode == "SOFTWARE"):
+                        similarity[i] += (torch.normal(0, self.vsa.dim, similarity[i].shape) * stoch).type(torch.int64)
+                    elif (self.mode == "HARDWARE"):
+                        similarity[i] += Resonator.noise[0]
+                        Resonator.noise.rotate(-1)
 
                 if (activation == 'ABS'):
                     similarity[i] = torch.abs(similarity[i])
@@ -174,7 +202,15 @@ class Resonator(nn.Module):
 
             # Apply stochasticity
             if (stoch):
-                similarity += (torch.normal(0, self.vsa.dim, similarity.shape) * stoch).type(torch.int64)
+                if (self.mode == "SOFTWARE"):
+                    similarity += (torch.normal(0, self.vsa.dim, similarity.shape) * stoch).type(torch.int64)
+                elif (self.mode == "HARDWARE"):
+                    similarity += Resonator.noise[0:f]
+                    if (type(Resonator.noise) is Tensor):
+                        Resonator.noise = Resonator.noise.roll(-f, -2)
+                    else:
+                        Resonator.noise.rotate(-f)
+
 
             # Apply activation
             if (activation == 'ABS'):
