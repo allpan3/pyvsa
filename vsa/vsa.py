@@ -375,3 +375,14 @@ class VSA:
         `input` is expected to be an expanded (unquantized) vector
         """
         return torch.sum(torch.where(input == 0, 0, 1), dim=-1)
+
+    def apply_noise(self, vector: Tensor, noise: float = 0.0, quantized = True) -> Tensor:
+        out = vector.clone()
+        indices = torch.rand(vector.shape) < noise
+        if quantized:
+            out[indices] = VSA.inverse(vector[indices])
+        else:
+            # Not a very good way to apply noise
+            out[indices] = torch.neg(vector[indices])
+        
+        return out
