@@ -255,10 +255,8 @@ class VSA:
         Shapes:
             - input:   :math:`(b*, n*, d)`
                 - b is batch [optional], n is the number of vectors to perform comparison [optional]
-            - others: :math:`(n*, v, d)`:  n = vectors [optional], v each of the n vectors in self is compared to v vectors
-                - n must match the n in self [optional], v is the number of vectors to compare against each of the n vectors in self
- 
-            If others only contain 1 vector, must unsqueeze before calling this function
+            - others: :math:`(n*, v*, d)`:  n = vectors [optional], v each of the n vectors in self is compared to v vectors
+                - n must match the n in self [optional], v is the number of vectors to compare against each of the n vectors in self [optional]
         """
 
         if cls.mode == "SOFTWARE":
@@ -269,6 +267,9 @@ class VSA:
             elif (input.dim() >= 1 and others.dim() == 2):
                 # input is (b*, d) and others is (v, d)
                 result = torch.matmul(input.unsqueeze(-2).type(torch.float32), others.transpose(-2,-1).type(torch.float32)).squeeze(-2)
+            elif (input.dim() >= 1 and others.dim() == 1):
+                # input is (b*, d) and others is (d)
+                result = torch.matmul(input.type(torch.float32), others.type(torch.float32))
             else:
                 raise NotImplementedError("Not implemented for this case")
 
@@ -281,11 +282,50 @@ class VSA:
             elif (input.dim() >= 1 and others.dim() == 2):
                 # input is (b*, d) and others is (v, d)
                 popcount = torch.where(input.unsqueeze(-2) == others, 1, -1)
+            elif (input.dim() >= 1 and others.dim() == 1):
+                # input is (b*, d) and others is (d)
+                popcount = torch.where(input == others, 1, -1)
             else:
                 raise NotImplementedError("Not implemented for this case")
                 # popcount = torch.where(input == others, 1, -1)
 
             return torch.sum(popcount, dim=-1, dtype=torch.int64)
+
+    @classmethod
+    def hamming_similarity(cls, input: Tensor, others: Tensor) -> Tensor:
+        """Hamming similarity between hypervectors.
+        Input vectors are expected to be quantized
+        Shapes:
+            - input:   :math:`(b*, n*, d)`
+                - b is batch [optional], n is the number of vectors to perform comparison [optional]
+            - others: :math:`(n*, v*, d)`:  n = vectors [optional], v each of the n vectors in self is compared to v vectors
+                - n must match the n in self [optional], v is the number of vectors to compare against each of the n vectors in self [optional]
+        """
+        if cls.mode == "SOFTWARE":
+            positive = torch.tensor(1, device=input.device)
+            negative = torch.tensor(-1, device=input.device)
+            v1 = torch.where(input >= 0, positive, negative)
+            v2 = torch.where(others >= 0, positive, negative)
+        elif cls.mode == "HARDWARE":
+            positive = torch.tensor(1, device=input.device)
+            negative = torch.tensor(0, device=input.device)
+            v1 = torch.where(input >= 0, positive, negative)
+            v2 = torch.where(others >= 0, positive, negative)
+
+        if (input.dim() >= 2 and others.dim() == 3):
+            assert(others.size(0) == input.size(-2))
+            # input is (b*, n, d) and others is (n, v, d)
+            result = torch.sum(torch.where(v1.unsqueeze(-2) == v2, 1, 0), dim=-1)
+        elif (input.dim() >= 1 and others.dim() == 2):
+            # input is (b*, d) and others is (v, d)
+            result = torch.sum(torch.where(v1.unsqueeze(-2) == v2, 1, 0), dim=-1)
+        elif (input.dim() >= 1 and others.dim() == 1):
+            # input is (b*, d) and others is (d)
+            result = torch.sum(torch.where(v1 == v2, 1, 0), dim=-1)
+        else:
+            raise NotImplementedError("Not implemented for this case") 
+
+        return result
 
     @classmethod
     def inverse(cls, input: Tensor, quantized = True) -> Tensor:
