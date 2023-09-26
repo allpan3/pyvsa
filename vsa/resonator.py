@@ -35,28 +35,30 @@ class Resonator(nn.Module):
         # Pre-generate a set of noise tensors
         if self.mode == "HARDWARE":
             if (self.stoch == "SIMILARITY"):
-                Resonator.noise = (torch.normal(0, self.vsa.dim, (300,)) * self.randomness).type(torch.int64)
+                Resonator.noise = (torch.normal(0, self.vsa.dim, (500,)) * self.randomness).type(torch.int64)
                 assert(len(Resonator.noise) > sum([codebooks[i].size(0) for i in range(len(codebooks))]))
 
             elif (self.stoch == "VECTOR"):
-                Resonator.noise = torch.rand(51, self.vsa.dim) < self.randomness
+                Resonator.noise = torch.rand(200, self.vsa.dim) < self.randomness
                 # To mimic hardware, retrict the number of noise vectors we store in memory. The more we store the closer it is to a true random model.
                 # The minimum required is the number of codevectors in the longest codebook so that in each iteration each codevector is applied with different noise
                 assert(Resonator.noise.size(0) >= max([len(codebooks[i]) for i in range(len(codebooks))]))
 
-        estimates, convergence = self.resonator_network(input, init_estimates, codebooks)
+        estimates, iter, converge = self.resonator_network(input, init_estimates, codebooks)
         # outcome: the indices of the codevectors in the codebooks
         outcome = self.vsa.cleanup(estimates, codebooks, self.argmax_abs)
         # Reorder the outcome to the original codebook order
         if (orig_indices != None):
             outcome = [tuple([outcome[j][i] for i in orig_indices]) for j in range(len(outcome))]
 
-        return outcome, convergence
+        return outcome, iter, converge
 
     def resonator_network(self, input: Tensor, init_estimates: Tensor, codebooks: Tensor or List[Tensor]):
         # Must clone, otherwise the original init_estiamtes will be modified
         estimates = init_estimates.clone()
         old_estimates = init_estimates.clone()
+        # TODO separate status for each batch
+        converge_status = False
         for k in range(self.iterations):
             if (self.resonator_type == "SEQUENTIAL"):
                 estimates, max_sim = self.resonator_stage_seq(input, estimates, codebooks, self.activation, self.lambd, self.stoch, self.randomness)
@@ -66,6 +68,7 @@ class Resonator(nn.Module):
             if (self.early_converge):
                 # If the similarity value for any factor exceeds the threshold, stop the loop
                 if all((torch.max(max_sim, dim=-1)[0] > int(self.vsa.dim * self.early_converge)).tolist()):
+                    converge_status = "EARLY"
                     break
                 # If the similarity of all factors exceed the treshold, stop the loop
                 # if all((max_sim.flatten() > int(self.vsa.dim * self.early_converge)).tolist()):
@@ -74,11 +77,12 @@ class Resonator(nn.Module):
             # Sometimes RN can enter "bistable" state where estiamtes are flipping polarity every iteration.
             # This is computationally slow. tolist() before all() makes it a lot faster
             if all((estimates == old_estimates).flatten().tolist()) or all((VSA.inverse(estimates) == old_estimates).flatten().tolist()):
+                converge_status = "CONVERGED"
                 break
             old_estimates = estimates.clone()
         # TODO we can stop iteration count for a particular batch if it has been determined to converge, but still can't stop the loop
         # That way we can get more accurate iteration count
-        return estimates, k 
+        return estimates, k, converge_status
 
 
     def resonator_stage_seq(self,
