@@ -40,15 +40,16 @@ class VSA:
         self.num_factors = num_factors
         self.num_codevectors = num_codevectors
 
+        if seed is not None:
+            torch.manual_seed(seed)
+
         # Generate codebooks
         if self._check_exists("codebooks.pt"):
             self.codebooks = torch.load(os.path.join(self.root, "codebooks.pt"), map_location=self.device)
         else:
-            self.codebooks = self.gen_codebooks(seed)
+            self.codebooks = self.gen_codebooks()
 
-    def gen_codebooks(self, seed) -> List[Tensor] or Tensor:
-        if seed is not None:
-            torch.manual_seed(seed)
+    def gen_codebooks(self) -> List[Tensor] or Tensor:
         l = []
         # All factors have the same number of vectors
         if (type(self.num_codevectors) == int):

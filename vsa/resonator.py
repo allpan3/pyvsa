@@ -11,7 +11,7 @@ class Resonator(nn.Module):
     noise = None
     mode : Literal["SOFTWARE", "HARDWARE"] = None
 
-    def __init__(self, vsa:VSA, mode: Literal["SOFTWARE", "HARDWARE"], type="CONCURRENT", activation='NONE', iterations=100, argmax_abs=True, lambd = 0, stoch = "NONE", randomness : float = 0.0, early_converge:float = None, device="cpu"):
+    def __init__(self, vsa:VSA, mode: Literal["SOFTWARE", "HARDWARE"], type="CONCURRENT", activation='NONE', iterations=100, argmax_abs=True, lambd = 0, stoch = "NONE", randomness : float = 0.0, early_converge:float = None, seed = None, device="cpu"):
         super(Resonator, self).__init__()
         self.to(device)
         
@@ -26,7 +26,9 @@ class Resonator(nn.Module):
         self.stoch = stoch
         self.randomness = randomness
         self.early_converge = early_converge
-
+        
+        if seed != None:
+            torch.manual_seed(seed)
 
     def forward(self, input: Tensor, init_estimates: Tensor, codebooks = None, orig_indices: List[int] = None):
         if codebooks == None:
