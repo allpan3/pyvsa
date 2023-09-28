@@ -34,10 +34,10 @@ class Resonator(nn.Module):
         if codebooks == None:
             codebooks = self.vsa.codebooks
 
-        # Pre-generate a set of noise tensors
-        if self.mode == "HARDWARE":
+        # Pre-generate a set of noise tensors; had to put it here to accomondate the case where partial codebooks are used
+        if self.mode == "HARDWARE" and Resonator.noise == None:
             if (self.stoch == "SIMILARITY"):
-                Resonator.noise = (torch.normal(0, self.vsa.dim, (500,)) * self.randomness).type(torch.int64)
+                Resonator.noise = (torch.normal(0, self.vsa.dim, (1000,)) * self.randomness).type(torch.int64)
                 assert(len(Resonator.noise) > sum([codebooks[i].size(0) for i in range(len(codebooks))]))
 
             elif (self.stoch == "VECTOR"):

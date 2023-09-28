@@ -393,6 +393,12 @@ class VSA:
         """
         return torch.sum(torch.where(input == 0, 0, 1), dim=-1)
 
+    @classmethod
+    def ca90(cls, input: Tensor) -> Tensor:
+        v1 = input.roll(1)
+        v2 = input.roll(-1)
+        return torch.logical_xor(v1, v2).to(input.dtype)
+
     def apply_noise(self, vector: Tensor, noise: float = 0.0, quantized = True) -> Tensor:
         out = vector.clone()
         indices = torch.rand(vector.shape) < noise
