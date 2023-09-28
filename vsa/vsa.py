@@ -54,11 +54,11 @@ class VSA:
         # All factors have the same number of vectors
         if (type(self.num_codevectors) == int):
             for i in range(self.num_factors):
-                l.append(self.random(self.num_codevectors, self.dim, device=self.device))
+                l.append(self.random(self.dim, self.num_codevectors, device=self.device))
         # Every factor has a different number of vectors
         else:
             for i in range(self.num_factors):
-                l.append(self.random(self.num_codevectors[i], self.dim, device=self.device))
+                l.append(self.random(self.dim, self.num_codevectors[i], device=self.device))
 
         try:
             l = torch.stack(l).to(self.device)
@@ -133,11 +133,14 @@ class VSA:
         return torch.empty(num_vectors, dimensions, dtype=dtype, device=device)
 
     @classmethod
-    def random(cls, num_vectors: int, dimensions: int, dtype=None, device=None) -> Tensor:
+    def random(cls, dimensions: int, num_vectors: int = None, dtype=None, device=None) -> Tensor:
         if dtype is None:
             dtype = torch.int8
-
-        size = (num_vectors, dimensions)
+        
+        if num_vectors is None:
+            size = dimensions
+        else:
+            size = (num_vectors, dimensions)
         select = torch.empty(size, dtype=torch.bool, device=device)
         select.bernoulli_(generator=None)
         if cls.mode == "SOFTWARE":
@@ -348,6 +351,20 @@ class VSA:
         elif cls.mode == "HARDWARE":
             positive = torch.tensor(1, dtype=input.dtype, device=input.device)
             negative = torch.tensor(0, dtype=input.dtype, device=input.device)
+
+        # So far doesn't seem like it's making a difference
+        # if cls.mode == "SOFTWARE":
+        #     # Random tiebreaker 
+        #     input = input.clone()
+        #     select = torch.empty(input[input == 0].shape, dtype=torch.bool, device=input.device)
+        #     select.bernoulli_(generator=None)
+        #     input[input==0] = torch.where(select, -1, +1).to(dtype=input.dtype, device=input.device)
+        # elif cls.mode == "HARDWARE":
+        #     # Alternating 1 and -1
+        #     input = input.clone()
+        #     tie = torch.ones(input[input == 0].shape, dtype=input.dtype, device=input.device)
+        #     tie[::2] = -1
+        #     input[input==0] = tie
 
         result = torch.where(input >= 0, positive, negative)
         return result
