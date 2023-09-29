@@ -28,11 +28,17 @@ class VSA:
             dim: int,
             num_factors: int,
             num_codevectors: int or Tuple[int], # number of vectors per factor, or tuple of number of codevectors for each factor
+            ehd_bits: int = 8, 
+            sim_bits: int = 13, 
             seed: None or int = None,  # random seed
             device = "cpu"
         ):
 
         VSA.mode = mode
+        VSA.max_ehd = 2 ** ehd_bits - 1
+        VSA.min_ehd = -2 ** ehd_bits
+        VSA.max_sim = 2 ** sim_bits - 1
+        VSA.min_sim = -2 ** sim_bits
 
         self.root = root
         self.dim = dim
@@ -187,7 +193,7 @@ class VSA:
             n_ = biggest_power_two(n)
             output = inputs[..., :n_, :]
 
-            # parallelize many XORs in a hierarchical manner
+            # Parallelize many XORs in a hierarchical manner
             # for larger batches this is significantly faster
             while output.size(-2) > 1:
                 output = torch.logical_not(torch.logical_xor(output[..., 0::2, :], output[..., 1::2, :])).to(inputs.dtype)
@@ -202,19 +208,17 @@ class VSA:
 
             return output.to(inputs.dtype)
 
-    # TODO support weight
     @classmethod
-    def bundle(cls, input: Tensor, others: Tensor, quantize = False) -> Tensor:
-        """Currently, only support the case when inputs are quantized vectors (doesn't matter for software mode)
+    def bundle(cls, input: Tensor, others: Tensor, weights_input: Tensor = None, weights_other: Tensor = None, quantize = False) -> Tensor:
+        """Currently require inputs to be expanded vectors (doesn't matter for software mode)
         """
         if cls.mode == "SOFTWARE":
             result = torch.add(input, others)
         elif cls.mode == "HARDWARE":
-            min_one = torch.tensor(-1, dtype=input.dtype, device=input.device)
-            _inputs = torch.where(input == 0, min_one, input)
-            _others = torch.where(others == 0, min_one, others)
-
-            result = torch.add(_inputs, _others)
+            result = torch.add(input, others)
+            # Clipping
+            result = torch.where(result > VSA.max_ehd, VSA.max_ehd, result)
+            result = torch.where(result < VSA.min_ehd, VSA.min_ehd, result)
 
         if quantize:
             result = cls.quantize(result)
@@ -226,26 +230,38 @@ class VSA:
         """ Bundle multiple hypervectors
             Currently only support the case when inputs are quantized vectors (doesn't matter for software mode)
             Shape:
-                - self:   :math:`(b*, n*, v, d)`
-                - weights: :math:`(b*, n*, v)`
-                - output:  :math:`(b*, n*, d)`
+                - inputs:   :math:`(b*, n*, v, d)` or :math:`(b*, v, d)`
+                - weights: :math:`(b*, n*, v)` or :math:`(b*, v)`
+                - output:  :math:`(b*, n*, d)` or :math:`(b*, d)`
         """
         if inputs.dim() < 2:
             raise RuntimeError(
                 f"data needs to have at least two dimensions for multiset, got size: {tuple(inputs.shape)}"
         )
 
-        _inputs = inputs
-        if cls.mode == "HARDWARE":
-            min_one = torch.tensor(-1, dtype=inputs.dtype, device=inputs.device)
-            _inputs = torch.where(inputs == 0, min_one, inputs)
- 
         if weights != None:
             assert(inputs.size(-2) == weights.size(-1))
-            # Add a dimension to weights so that each weight value is applied to all dimensions of the vector
-            result = torch.matmul(weights.unsqueeze(-2).type(torch.float32), _inputs.type(torch.float32)).squeeze(-2).type(torch.int64)
-        else:
-            result = torch.sum(_inputs, dim=-2, dtype=torch.int64) 
+
+        if cls.mode == "HARDWARE":
+            shape = list(inputs.shape)
+            del shape[-2]
+            result = torch.zeros(shape, dtype=torch.int32, device=inputs.device)
+            # Use expand and bundle methods so that clipping is taken care of
+            if weights != None:
+                inputs = cls.expand(inputs, weights)
+            else:
+                inputs = cls.expand(inputs)
+
+            for i in range(inputs.size(-2)):
+                result = cls.bundle(result, inputs[..., i, :])
+
+        elif cls.mode == "SOFTWARE":
+            if weights != None:
+                # Add a dimension to weights so that each weight value is applied to all dimensions of the vector
+                result = torch.matmul(weights.unsqueeze(-2).type(torch.float32), inputs.type(torch.float32)).squeeze(-2).type(torch.int64)
+            else:
+                result = torch.sum(inputs, dim=-2, dtype=torch.int64) 
+
 
         if quantize:
             result = cls.quantize(result)
@@ -257,9 +273,10 @@ class VSA:
         """Inner product between hypervectors.
         Input vectors are expected to be quantized
         Shapes:
-            - input:   :math:`(b*, n*, d)`
+            - input:   :math:`(b*, n, d)` or :math:`(b*, d)`
                 - b is batch [optional], n is the number of vectors to perform comparison [optional]
-            - others: :math:`(n*, v*, d)`:  n = vectors [optional], v each of the n vectors in self is compared to v vectors
+            - others: :math:`(n*, v*, d)`: 
+                - n = vectors [optional], v each of the n vectors in self is compared to v vectors
                 - n must match the n in self [optional], v is the number of vectors to compare against each of the n vectors in self [optional]
         """
 
@@ -292,8 +309,14 @@ class VSA:
             else:
                 raise NotImplementedError("Not implemented for this case")
                 # popcount = torch.where(input == others, 1, -1)
+            
+            result = torch.sum(popcount, dim=-1, dtype=torch.int64)
+            # Clipping
+            result = torch.where(result > VSA.max_sim, VSA.max_sim, result)
+            result = torch.where(result < VSA.min_sim, VSA.min_sim, result)
 
-            return torch.sum(popcount, dim=-1, dtype=torch.int64)
+            return result
+
 
     @classmethod
     def hamming_similarity(cls, input: Tensor, others: Tensor) -> Tensor:
@@ -370,11 +393,36 @@ class VSA:
         return result
 
     @classmethod
-    def expand(cls, input):
+    def expand(cls, input, weight = None) -> Tensor:
+        """
+        Shape: 
+            input:  (b*, n*, v, d) or (b*, v, d) or (d)
+            weight: (b*, n*, v) or or (b*, v) or (1)
+        """
         if cls.mode == "SOFTWARE":
-            return input
+            if weight is None:
+                return input
+            else:
+                if (input.dim() == 1 and weight.dim() == 1):
+                    return input * weight
+                else:
+                    assert(input.dim() >= 2 and weight.dim() >= 1 and input.size(-2) == weight.size(-1))
+                    return input * weight.unsqueeze(-1)
         elif cls.mode == "HARDWARE":
-            return torch.where(input == 0, -1, input)
+            input = torch.where(input == 0, -1, 1)
+            if weight is None:
+                return input
+            else:
+                if (input.dim() == 1 and weight.dim() == 1):
+                    result = input * weight
+                else:
+                    assert(input.dim() >= 2 and weight.dim() >= 1 and input.size(-2) == weight.size(-1))
+                    result = input * weight.unsqueeze(-1)
+
+                # Clipping
+                result = torch.where(result > VSA.max_ehd, VSA.max_ehd, result)
+                result = torch.where(result < VSA.min_ehd, VSA.min_ehd, result)
+                return result
     
     @classmethod
     def is_quantized(cls, input: Tensor) -> bool:
