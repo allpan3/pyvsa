@@ -3,15 +3,14 @@ import torch
 from torch import Tensor
 from typing import Literal, List
 from .vsa import VSA
-import random
-from collections import deque
+import math
 
 class Resonator(nn.Module):
 
     noise = None
     mode : Literal["SOFTWARE", "HARDWARE"] = None
 
-    def __init__(self, vsa:VSA, mode: Literal["SOFTWARE", "HARDWARE"], type="CONCURRENT", activation='NONE', iterations=100, argmax_abs=True, lambd = 0, stoch = "NONE", randomness : float = 0.0, early_converge:float = None, seed = None, device="cpu"):
+    def __init__(self, vsa:VSA, mode: Literal["SOFTWARE", "HARDWARE"], type="CONCURRENT", activation='NONE', iterations=1000, argmax_abs=True, act_val = None, stoch = "NONE", randomness : float = 0.0, early_converge:float = None, seed = None, device="cpu"):
         super(Resonator, self).__init__()
         self.to(device)
         
@@ -22,7 +21,7 @@ class Resonator(nn.Module):
         self.iterations = iterations
         self.activation = activation
         self.argmax_abs = argmax_abs
-        self.lambd = lambd
+        self.act_val = act_val
         self.stoch = stoch
         self.randomness = randomness
         self.early_converge = early_converge
@@ -37,7 +36,7 @@ class Resonator(nn.Module):
         # Pre-generate a set of noise tensors; had to put it here to accomondate the case where partial codebooks are used
         if self.mode == "HARDWARE" and Resonator.noise == None:
             if (self.stoch == "SIMILARITY"):
-                Resonator.noise = (torch.normal(0, self.vsa.dim, (1000,)) * self.randomness).type(torch.int64)
+                Resonator.noise = (torch.normal(0, self.vsa.dim, (12932,)) * self.randomness).type(torch.int64)
                 assert(len(Resonator.noise) > sum([codebooks[i].size(0) for i in range(len(codebooks))]))
 
             elif (self.stoch == "VECTOR"):
@@ -63,18 +62,19 @@ class Resonator(nn.Module):
         converge_status = False
         for k in range(self.iterations):
             if (self.resonator_type == "SEQUENTIAL"):
-                estimates, max_sim = self.resonator_stage_seq(input, estimates, codebooks, self.activation, self.lambd, self.stoch, self.randomness)
+                estimates, max_sim = self.resonator_stage_seq(input, estimates, codebooks, self.activation, self.act_val, self.stoch, self.randomness)
             elif (self.resonator_type == "CONCURRENT"):
-                estimates, max_sim = self.resonator_stage_concur(input, estimates, codebooks, self.activation, self.lambd, self.stoch, self.randomness)
+                estimates, max_sim = self.resonator_stage_concur(input, estimates, codebooks, self.activation, self.act_val, self.stoch, self.randomness)
 
             if (self.early_converge):
+                # TODO make this a config option
                 # If the similarity value for any factor exceeds the threshold, stop the loop
-                if all((torch.max(max_sim, dim=-1)[0] > int(self.vsa.dim * self.early_converge)).tolist()):
-                    converge_status = "EARLY"
-                    break
-                # If the similarity of all factors exceed the treshold, stop the loop
-                # if all((max_sim.flatten() > int(self.vsa.dim * self.early_converge)).tolist()):
+                # if all((torch.max(max_sim, dim=-1)[0] > int(self.vsa.dim * self.early_converge)).tolist()):
+                #     converge_status = "EARLY"
                 #     break
+                # If the similarity of all factors exceed the treshold, stop the loop
+                if all((max_sim.flatten() > int(self.vsa.dim * self.early_converge)).tolist()):
+                    break
             # Absolute convergence is signified by identical estimates in consecutive iterations
             # Sometimes RN can enter "bistable" state where estiamtes are flipping polarity every iteration.
             # This is computationally slow. tolist() before all() makes it a lot faster
@@ -92,7 +92,7 @@ class Resonator(nn.Module):
                             estimates: Tensor,
                             codebooks: Tensor or List[Tensor],
                             activation = 'IDENTITY',
-                            lambd: float = 0,
+                            act_val =None,
                             stoch = "NONE", 
                             randomness: float = 0.0) -> Tensor:
         
@@ -103,7 +103,7 @@ class Resonator(nn.Module):
         else:
             b = input.size(0)
         f = estimates.size(-2)
-        max_sim = torch.empty((b, f), dtype=torch.int64, device=self.device)
+        max_sim = torch.empty((b, f), dtype=torch.int64, device=self.device) 
 
         for i in range(estimates.size(-2)):
             # Remove the currently processing factor itself
@@ -122,7 +122,7 @@ class Resonator(nn.Module):
                 elif (self.mode == "HARDWARE"):
                     _codebook[Resonator.noise[0:_codebook.size(0)]] = VSA.inverse(_codebook[Resonator.noise[0:_codebook.size(0)]])
                     Resonator.noise = Resonator.noise.roll(-_codebook.size(0), 0)
-
+            # similarity.shape = (b, v)
             similarity = VSA.dot_similarity(new_estimates, _codebook)
 
             # Apply stochasticity
@@ -133,17 +133,41 @@ class Resonator(nn.Module):
                     similarity += Resonator.noise[0:_codebook.size(0)]
                     Resonator.noise = Resonator.noise.roll(-_codebook.size(0), -1)
 
-            if (activation == 'ABS'):
-                similarity = torch.abs(similarity)
-            elif (activation == 'THRESHOLD'):
-                similarity = torch.nn.Threshold(int(self.vsa.dim * lambd), 0)(similarity)
-            elif (activation == 'HARDSHRINK'):
-                similarity = torch.nn.Hardshrink(lambd=int(self.vsa.dim*lambd))(similarity.type(torch.float32)).type(torch.int64)
+            # Apply activation
+            if (activation == 'THRESHOLD'):
+                # Wipe out all values below the threshold
+                if self.mode == "SOFTWARE":
+                    similarity = torch.nn.Threshold(act_val, 0)(similarity)
+                elif self.mode == "HARDWARE":
+                    # In hardware mode, threshold must be a power of 2
+                    try:
+                        exp = round(math.log2(act_val))
+                    except:
+                        exp = 0
+                    similarity = torch.nn.Threshold(2 ** exp - 1, 0)(similarity)
+            elif (activation == 'SCALEDOWN'):
+                # Sacle down has the similar effect of hardshrink as small values are even smaller. It scales down the large values, which doesn't matter
+                # Note that early convergence threshold value also needs to be scaled accordingly
+                if self.mode == "SOFTWARE":
+                    similarity = similarity // act_val
+                elif self.mode == "HARDWARE":
+                    # In hardware mode, we use right shift so small positive values are zeroed, and small negative values are pushed to -1
+                    # Scaling the value down helps with clipping. Make sure the early convergence threshold accounts for this scaling as well
+                    shift = round(math.log2(act_val))
+                    similarity = similarity >> shift
+            elif (activation == "THRESH_AND_SCALE"):
+                # Combine thresholding and scaling: all negative values are automatically wiped out, then the remaining values are scaled down
+                # Note that early convergence threshold value also needs to be scaled accordingly
+                if self.mode == "SOFTWARE":
+                    similarity = torch.nn.Threshold(0, 0)(similarity) // act_val
+                elif self.mode == "HARDWARE":
+                    # Note in hardware mode positive values are effectively thresholded by the scale factor, as small values are wiped out by right shift
+                    shift = round(math.log2(act_val))
+                    similarity = torch.nn.Threshold(0, 0)(similarity) >> shift
 
-
-            # Dot Product with the respective weights and sum
+            # Dot Product with the respective weights and sum, unsqueeze codebook to account for batch
             # Update the estimate in place
-            estimates[:,i] = VSA.multiset(codebooks[i], similarity, quantize=True)
+            estimates[:,i] = VSA.multiset(codebooks[i].unsqueeze(0).repeat(b,1,1), similarity, quantize=True)
 
             max_sim[:,i] = torch.max(similarity, dim=-1)[0]
 
@@ -154,7 +178,7 @@ class Resonator(nn.Module):
                                estimates: Tensor,
                                codebooks: Tensor or List[Tensor],
                                activation = "IDENTITY",
-                               lambd: float = 0,
+                               act_val = None,
                                stoch = "NONE",
                                randomness: float = 0.0) -> Tensor:
         '''
@@ -217,13 +241,29 @@ class Resonator(nn.Module):
                         similarity[i] += Resonator.noise[0:_codebooks[i].size(0)]
                         Resonator.noise = Resonator.noise.roll(-_codebooks[i].size(0), -1)
 
-                if (activation == 'ABS'):
-                    similarity[i] = torch.abs(similarity[i])
-                elif (activation == 'THRESHOLD'):
-                    similarity[i] = torch.nn.Threshold(int(self.vsa.dim * lambd), 0)(similarity[i])
-                elif (activation == 'HARDSHRINK'):
-                    similarity[i] = torch.nn.Hardshrink(lambd=int(self.vsa.dim * lambd))(similarity[i].type(torch.float32)).type(torch.int64)
-
+                # Apply activation; see resonator_stage_seq for detailed comments
+                if (activation == 'THRESHOLD'):
+                    if self.mode == "SOFTWARE":
+                        similarity[i] = torch.nn.Threshold(act_val, 0)(similarity[i])
+                    elif self.mode == "HARDWARE":
+                        try:
+                            exp = round(math.log2(act_val))
+                        except:
+                            exp = 0
+                        similarity[i] = torch.nn.Threshold(2 ** exp - 1, 0)(similarity[i])
+                elif (activation == 'SCALEDOWN'):
+                    if self.mode == "SOFTWARE":
+                        similarity[i] = similarity[i] // act_val
+                    elif self.mode == "HARDWARE":
+                        shift = round(math.log2(act_val))
+                        similarity[i] = similarity[i] >> shift
+                elif (activation == "THRESH_AND_SCALE"):
+                    if self.mode == "SOFTWARE":
+                        similarity[i] = torch.nn.Threshold(0, 0)(similarity[i]) // act_val
+                    elif self.mode == "HARDWARE":
+                        shift = round(math.log2(act_val))
+                        similarity[i] = torch.nn.Threshold(0, 0)(similarity[i]) >> shift
+                
                 # Dot Product with the respective weights and sum
                 output[:,i] = VSA.multiset(codebooks[i], similarity[i], quantize=True)
 
@@ -239,14 +279,29 @@ class Resonator(nn.Module):
                     similarity += Resonator.noise[0:_codebooks.size(1)*f].view(f, _codebooks.size(1))
                     Resonator.noise = Resonator.noise.roll(-_codebooks.size(1)*f, -1)
 
-            # Apply activation
-            if (activation == 'ABS'):
-                similarity = torch.abs(similarity)
-            elif (activation == 'THRESHOLD'):
-                similarity = torch.nn.Threshold(int(self.vsa.dim * lambd), 0)(similarity)
-            elif (activation == 'HARDSHRINK'):
-                similarity = torch.nn.Hardshrink(lambd=int(self.vsa.dim * lambd))(similarity.type(torch.float32)).type(torch.int64)
-            
+            # Apply activation; see resonator_stage_seq for detailed comments
+            if (activation == 'THRESHOLD'):
+                if self.mode == "SOFTWARE":
+                    similarity = torch.nn.Threshold(act_val, 0)(similarity)
+                elif self.mode == "HARDWARE":
+                    try:
+                        exp = round(math.log2(act_val))
+                    except:
+                        exp = 0
+                    similarity = torch.nn.Threshold(2 ** exp - 1, 0)(similarity)
+            elif (activation == 'SCALEDOWN'):
+                if self.mode == "SOFTWARE":
+                    similarity = similarity // act_val
+                elif self.mode == "HARDWARE":
+                    shift = round(math.log2(act_val))
+                    similarity = similarity >> shift
+            elif (activation == "THRESH_AND_SCALE"):
+                if self.mode == "SOFTWARE":
+                    similarity = torch.nn.Threshold(0, 0)(similarity) // act_val
+                elif self.mode == "HARDWARE":
+                    shift = round(math.log2(act_val))
+                    similarity = torch.nn.Threshold(0, 0)(similarity) >> shift
+
             # Dot Product with the respective weights and sum
             output = VSA.multiset(codebooks, similarity, quantize=True)
 
