@@ -36,7 +36,7 @@ class Resonator(nn.Module):
         # Pre-generate a set of noise tensors; had to put it here to accomondate the case where partial codebooks are used
         if self.mode == "HARDWARE" and Resonator.noise == None:
             if (self.stoch == "SIMILARITY"):
-                Resonator.noise = (torch.normal(0, self.vsa.dim, (12932,)) * self.randomness).type(torch.int64)
+                Resonator.noise = (torch.normal(0, self.vsa.dim, (1659,)) * self.randomness).type(torch.int64)
                 assert(len(Resonator.noise) > sum([codebooks[i].size(0) for i in range(len(codebooks))]))
 
             elif (self.stoch == "VECTOR"):
@@ -69,12 +69,12 @@ class Resonator(nn.Module):
             if (self.early_converge):
                 # TODO make this a config option
                 # If the similarity value for any factor exceeds the threshold, stop the loop
-                # if all((torch.max(max_sim, dim=-1)[0] > int(self.vsa.dim * self.early_converge)).tolist()):
-                #     converge_status = "EARLY"
-                #     break
-                # If the similarity of all factors exceed the treshold, stop the loop
-                if all((max_sim.flatten() > int(self.vsa.dim * self.early_converge)).tolist()):
+                if all((torch.max(max_sim, dim=-1)[0] > int(self.vsa.dim * self.early_converge)).tolist()):
+                    converge_status = "EARLY"
                     break
+                # If the similarity of all factors exceed the treshold, stop the loop
+                # if all((max_sim.flatten() > int(self.vsa.dim * self.early_converge)).tolist()):
+                #     break
             # Absolute convergence is signified by identical estimates in consecutive iterations
             # Sometimes RN can enter "bistable" state where estiamtes are flipping polarity every iteration.
             # This is computationally slow. tolist() before all() makes it a lot faster
