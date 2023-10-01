@@ -36,11 +36,11 @@ class Resonator(nn.Module):
         # Pre-generate a set of noise tensors; had to put it here to accomondate the case where partial codebooks are used
         if self.mode == "HARDWARE" and Resonator.noise == None:
             if (self.stoch == "SIMILARITY"):
-                Resonator.noise = (torch.normal(0, self.vsa.dim, (1659,)) * self.randomness).type(torch.int64)
+                Resonator.noise = (torch.normal(0, self.vsa.dim, (1659,)) * self.randomness).to(self.device).type(torch.int64)
                 assert(len(Resonator.noise) > sum([codebooks[i].size(0) for i in range(len(codebooks))]))
 
             elif (self.stoch == "VECTOR"):
-                Resonator.noise = torch.rand(200, self.vsa.dim) < self.randomness
+                Resonator.noise = torch.rand(200, self.vsa.dim, device=self.device) < self.randomness
                 # To mimic hardware, retrict the number of noise vectors we store in memory. The more we store the closer it is to a true random model.
                 # The minimum required is the number of codevectors in the longest codebook so that in each iteration each codevector is applied with different noise
                 assert(Resonator.noise.size(0) >= max([len(codebooks[i]) for i in range(len(codebooks))]))
@@ -128,7 +128,7 @@ class Resonator(nn.Module):
             # Apply stochasticity
             if (stoch == "SIMILARITY"):
                 if (self.mode == "SOFTWARE"):
-                    similarity += (torch.normal(0, self.vsa.dim, similarity.shape) * randomness).type(torch.int64)
+                    similarity += (torch.normal(0, self.vsa.dim, similarity.shape) * randomness).to(self.device).type(torch.int64)
                 elif (self.mode == "HARDWARE"):
                     similarity += Resonator.noise[0:_codebook.size(0)]
                     Resonator.noise = Resonator.noise.roll(-_codebook.size(0), -1)
