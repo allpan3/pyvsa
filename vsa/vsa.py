@@ -319,6 +319,7 @@ class VSA:
 
 
     @classmethod
+    #TODO: hardware mode clipping not done yet
     def hamming_similarity(cls, input: Tensor, others: Tensor) -> Tensor:
         """Hamming similarity between hypervectors.
         Input vectors are expected to be quantized
@@ -455,5 +456,7 @@ class VSA:
         else:
             # Not a very good way to apply noise
             out[indices] = torch.neg(vector[indices])
+            # 0 is not affected by neg, so we need to manually set it to -1 (normally it quantizes to 1)
+            out[indices] = torch.where(out[indices] == 0, -1, out[indices])
         
         return out
