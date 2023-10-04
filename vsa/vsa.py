@@ -69,7 +69,7 @@ class VSA:
                 l = self.random((self.num_factors, self.num_codevectors, self.dim), device=self.device)
             elif self.mode == "HARDWARE":
                 # Generate the first fold and generate the rest through CA90
-                l = self._gen_full_vector(self.random((self.num_codevectors, self.fold_dim), device=self.device))
+                l = self._gen_full_vector(self.random((self.num_factors, self.num_codevectors, self.fold_dim), device=self.device))
         # Every factor has a different number of vectors
         else:
             l = []
@@ -86,7 +86,7 @@ class VSA:
 
         os.makedirs(os.path.dirname(file), exist_ok=True)
         torch.save(l, file)
-        print("Done. Saved to ", file)
+        print("Done. Saved to", file)
         return l
 
     def cleanup(self, inputs: Tensor, codebooks: Tensor or List[Tensor] = None, abs = True):
@@ -478,7 +478,7 @@ class VSA:
         Generate the rest of the vector through CA90
         """
         assert(fold.size(-1) == self.fold_dim)
-        size = fold.shape[:-1] + (self.dim,)
+
         vector = fold.clone()
         for i in range(self.dim // self.fold_dim - 1):
             fold = self.ca90(fold)
