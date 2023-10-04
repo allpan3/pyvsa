@@ -54,35 +54,39 @@ class VSA:
             torch.manual_seed(seed)
 
         # Generate codebooks
-        if self._check_exists("codebooks.pt"):
-            self.codebooks = torch.load(os.path.join(self.root, "codebooks.pt"), map_location=self.device)
+        file = os.path.join(self.root, "codebooks.pt")
+        if os.path.exists(file):
+            print(f"Loading codebooks from {file}")
+            self.codebooks = torch.load(file, map_location=self.device)
         else:
-            self.codebooks = self.gen_codebooks()
+            print("Generating codebooks...", end="")
+            self.codebooks = self.gen_codebooks(file)
 
-    def gen_codebooks(self) -> List[Tensor] or Tensor:
-        l = []
-
+    def gen_codebooks(self, file) -> List[Tensor] or Tensor:
         # All factors have the same number of vectors
         if (type(self.num_codevectors) == int):
-            for i in range(self.num_factors):
-                if self.mode == "SOFTWARE":
-                    l.append(self.random(self.dim, self.num_codevectors, device=self.device))
-                elif self.mode == "HARDWARE":
-                    # Generate the first fold and generate the rest through CA90
-                    self._gen_full_vector(self.random(self.fold_dim, self.num_codevectors, device=self.device))
+            if self.mode == "SOFTWARE":
+                l = self.random((self.num_factors, self.num_codevectors, self.dim), device=self.device)
+            elif self.mode == "HARDWARE":
+                # Generate the first fold and generate the rest through CA90
+                l = self._gen_full_vector(self.random((self.num_codevectors, self.fold_dim), device=self.device))
         # Every factor has a different number of vectors
         else:
+            l = []
             for i in range(self.num_factors):
-                l.append(self.random(self.dim, self.num_codevectors[i], device=self.device))
+                if self.mode == "SOFTWARE":
+                    l.append(self.random((self.num_codevectors[i], self.dim), device=self.device))
+                elif self.mode == "HARDWARE":
+                    l.append(self._gen_full_vector(self.random((self.num_codevectors[i], self.fold_dim), device=self.device)))
 
-        try:
-            l = torch.stack(l).to(self.device)
-        except:
-            pass
+            try:
+                l = torch.stack(l).to(self.device)
+            except:
+                pass
 
-        os.makedirs(self.root, exist_ok=True)
-        torch.save(l, os.path.join(self.root, f"codebooks.pt"))
-
+        os.makedirs(os.path.dirname(file), exist_ok=True)
+        torch.save(l, file)
+        print("Done. Saved to ", file)
         return l
 
     def cleanup(self, inputs: Tensor, codebooks: Tensor or List[Tensor] = None, abs = True):
@@ -136,26 +140,25 @@ class VSA:
         else:
             return self.multiset(torch.stack([self._get_vector(key[i]) for i in range(len(key))]), quantize=quantize)
 
-    def _check_exists(self, file) -> bool:
-        return os.path.exists(os.path.join(self.root, file))
-
-
     @classmethod
-    def empty(cls, num_vectors: int, dimensions: int, dtype=None, device=None) -> Tensor:
+    def empty(cls, size: tuple or torch.Size or int, dtype=None, device=None) -> Tensor:
+        """
+            size: (b, n) or (n) or n    (Exclude vector dimension)
+            dimensions: d
+        """
         if dtype is None:
             dtype = torch.int8
 
-        return torch.empty(num_vectors, dimensions, dtype=dtype, device=device)
+        return torch.empty(size, dtype=dtype, device=device)
 
     @classmethod
-    def random(cls, dimensions: int, num_vectors: int = None, dtype=None, device=None) -> Tensor:
+    def random(cls, size: torch.Size or tuple or int, dtype=None, device=None) -> Tensor:
+        """
+            size: (b, n, d) or (n, d) or (d) or d    (Exclude vector dimension)
+        """
         if dtype is None:
             dtype = torch.int8
-        
-        if num_vectors is None:
-            size = dimensions
-        else:
-            size = (num_vectors, dimensions)
+
         select = torch.empty(size, dtype=torch.bool, device=device)
         select.bernoulli_(generator=None)
         if cls.mode == "SOFTWARE":
@@ -453,8 +456,8 @@ class VSA:
 
     @classmethod
     def ca90(cls, input: Tensor) -> Tensor:
-        v1 = input.roll(1)
-        v2 = input.roll(-1)
+        v1 = input.roll(1, -1)
+        v2 = input.roll(-1, -1)
         return torch.logical_xor(v1, v2).to(input.dtype)
 
     def apply_noise(self, vector: Tensor, noise: float = 0.0, quantized = True) -> Tensor:
@@ -475,7 +478,9 @@ class VSA:
         Generate the rest of the vector through CA90
         """
         assert(fold.size(-1) == self.fold_dim)
-        vector = self.empty(fold.size(0), self.dim)
+        size = fold.shape[:-1] + (self.dim,)
+        vector = fold.clone()
         for i in range(self.dim // self.fold_dim - 1):
-            vector = torch.cat((vector, self.ca90(vector)), dim=-1)
+            fold = self.ca90(fold)
+            vector = torch.cat((vector, fold), dim=-1)
         return vector
