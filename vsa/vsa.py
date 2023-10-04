@@ -28,6 +28,7 @@ class VSA:
             dim: int,
             num_factors: int,
             num_codevectors: int or Tuple[int], # number of vectors per factor, or tuple of number of codevectors for each factor
+            fold_dim: int = 256,
             ehd_bits: int = 8, 
             sim_bits: int = 13, 
             seed: None or int = None,  # random seed
@@ -39,6 +40,9 @@ class VSA:
         VSA.min_ehd = -2 ** ehd_bits
         VSA.max_sim = 2 ** sim_bits - 1
         VSA.min_sim = -2 ** sim_bits
+        VSA.fold_dim = fold_dim
+
+        assert(dim % fold_dim == 0)
 
         self.root = root
         self.dim = dim
@@ -57,10 +61,15 @@ class VSA:
 
     def gen_codebooks(self) -> List[Tensor] or Tensor:
         l = []
+
         # All factors have the same number of vectors
         if (type(self.num_codevectors) == int):
             for i in range(self.num_factors):
-                l.append(self.random(self.dim, self.num_codevectors, device=self.device))
+                if self.mode == "SOFTWARE":
+                    l.append(self.random(self.dim, self.num_codevectors, device=self.device))
+                elif self.mode == "HARDWARE":
+                    # Generate the first fold and generate the rest through CA90
+                    self._gen_full_vector(self.random(self.fold_dim, self.num_codevectors, device=self.device))
         # Every factor has a different number of vectors
         else:
             for i in range(self.num_factors):
@@ -460,3 +469,13 @@ class VSA:
             out[indices] = torch.where(out[indices] == 0, -1, out[indices])
         
         return out
+    
+    def _gen_full_vector(self, fold: Tensor) -> Tensor:
+        """
+        Generate the rest of the vector through CA90
+        """
+        assert(fold.size(-1) == self.fold_dim)
+        vector = self.empty(fold.size(0), self.dim)
+        for i in range(self.dim // self.fold_dim - 1):
+            vector = torch.cat((vector, self.ca90(vector)), dim=-1)
+        return vector
