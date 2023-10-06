@@ -29,8 +29,21 @@ class Resonator(nn.Module):
         if seed != None:
             torch.manual_seed(seed)
 
-    def forward(self, input: Tensor, init_estimates: Tensor, codebooks = None, orig_indices: List[int] = None):
-        if codebooks == None:
+    def forward(self, input: Tensor, init_estimates: Tensor, codebooks = None, known: tuple = None, orig_indices: List[int] = None):
+        """
+            known: A tuple of indices of factors. Elements whose values are not None are known factors and the value is the index of the codevector in the orginal codebook
+                   `known` should only be supplied when codebooks is also supplied  
+                   The same `known` is used by all batches
+        """
+        # If known is given, unbind the known factors from input and run resonator network with the rest
+        if known is not None:
+            assert(codebooks is not None)
+            assert(len(known) == len(self.vsa.codebooks))
+            known_vector = torch.stack([self.vsa.codebooks[i][known[i]] for i in range(len(known)) if known[i] is not None])
+            known_vector = self.vsa.multibind(known_vector)
+            input = self.vsa.bind(input, known_vector)
+
+        if codebooks is None:
             codebooks = self.vsa.codebooks
 
         # Pre-generate a set of noise tensors; had to put it here to accomondate the case where partial codebooks are used
@@ -47,7 +60,29 @@ class Resonator(nn.Module):
 
         estimates, iter, converge = self.resonator_network(input, init_estimates, codebooks)
         # outcome: the indices of the codevectors in the codebooks
-        outcome = self.vsa.cleanup(estimates, codebooks, self.argmax_abs)
+        outcome, similarity = self.vsa.cleanup(estimates, codebooks, self.argmax_abs)
+
+        # Insert the known vectors into the outcome
+        if known is not None:
+            if input.dim() == 1:
+                _outcome = list(known)
+                k = 0
+                for j in range(len(_outcome)):
+                    if _outcome[j] is None:
+                        _outcome[j] = outcome[k]
+                        k += 1
+                outcome = tuple(_outcome)
+            else:
+                # per-batch
+                for i in range(len(outcome)):
+                    _outcome = list(known)
+                    k = 0
+                    for j in range(len(_outcome)):
+                        if _outcome[j] is None:
+                            _outcome[j] = outcome[i][k]
+                            k += 1
+                    outcome[i] = tuple(_outcome)
+
         # Reorder the outcome to the original codebook order
         if (orig_indices != None):
             outcome = [tuple([outcome[j][i] for i in orig_indices]) for j in range(len(outcome))]
@@ -69,7 +104,11 @@ class Resonator(nn.Module):
             if (self.early_converge):
                 # TODO make this a config option
                 # If the similarity value for any factor exceeds the threshold, stop the loop
-                if all((torch.max(max_sim, dim=-1)[0] > int(self.vsa.dim * self.early_converge)).tolist()):
+                if max_sim.dim() == 1:
+                    early_converge = (torch.max(max_sim, dim=-1)[0] > int(self.vsa.dim * self.early_converge)).item()
+                else:
+                    early_converge = all((torch.max(max_sim, dim=-1)[0] > int(self.vsa.dim * self.early_converge)).tolist())
+                if early_converge:
                     converge_status = "EARLY"
                     break
                 # If the similarity of all factors exceed the treshold, stop the loop
@@ -84,7 +123,7 @@ class Resonator(nn.Module):
             old_estimates = estimates.clone()
         # TODO we can stop iteration count for a particular batch if it has been determined to converge, but still can't stop the loop
         # That way we can get more accurate iteration count
-        return estimates, k, converge_status
+        return estimates, k+1, converge_status
 
 
     def resonator_stage_seq(self,
@@ -95,20 +134,33 @@ class Resonator(nn.Module):
                             act_val =None,
                             stoch = "NONE", 
                             randomness: float = 0.0) -> Tensor:
-        
+        """
+        ARGS:
+            input: `(b*, d)`
+            estimates: (b*, f, d)     
+        """
         # Since we only target MAP, inverse of a vector itself
 
-        if input.dim() == 1:
-            b = 1
-        else:
-            b = input.size(0)
         f = estimates.size(-2)
-        max_sim = torch.empty((b, f), dtype=torch.int64, device=self.device) 
+        if input.dim() == 1:
+            # No batch
+            assert(estimates.dim() == 2)
+            b = 1
+            max_sim = torch.empty(f, dtype=torch.int64, device=self.device) 
+        else:
+            assert(input.size(0) == estimates.size(0))
+            b = input.size(0)
+            max_sim = torch.empty((b, f), dtype=torch.int64, device=self.device) 
 
         for i in range(estimates.size(-2)):
             # Remove the currently processing factor itself
             rolled = estimates.roll(-i, -2)
-            inv_estimates = torch.stack([rolled[j][1:] for j in range(estimates.size(0))])
+            if estimates.dim() == 3:
+                inv_estimates = torch.stack([rolled[j][1:] for j in range(estimates.size(0))])
+            else:
+                # No batch
+                inv_estimates = rolled[1:]
+
             inv_others = VSA.multibind(inv_estimates)
             new_estimates = VSA.bind(input, inv_others)
 
@@ -167,9 +219,13 @@ class Resonator(nn.Module):
 
             # Dot Product with the respective weights and sum, unsqueeze codebook to account for batch
             # Update the estimate in place
-            estimates[:,i] = VSA.multiset(codebooks[i].unsqueeze(0).repeat(b,1,1), similarity, quantize=True)
-
-            max_sim[:,i] = torch.max(similarity, dim=-1)[0]
+            if estimates.dim() == 3:
+                estimates[:,i] = VSA.multiset(codebooks[i].unsqueeze(0).repeat(b,1,1), similarity, quantize=True)
+                max_sim[:,i] = torch.max(similarity, dim=-1)[0]
+            else:
+                # No batch
+                estimates[i] = VSA.multiset(codebooks[i], similarity, quantize=True)
+                max_sim[i] = torch.max(similarity, dim=-1)[0]
 
         return estimates, max_sim
 
@@ -186,11 +242,17 @@ class Resonator(nn.Module):
             input: `(b*, d)`. d is dimension (b dim is optional)
             estimates: `(b, f, d)`. b is batch size, f is number of factors, d is dimension
         '''
+
         f = estimates.size(-2)
         if input.dim() == 1:
+            # No batch
+            assert(estimates.dim() == 2)
             b = 1
+            max_sim = torch.empty(f, dtype=torch.int64, device=self.device) 
         else:
+            assert(input.size(0) == estimates.size(0))
             b = input.size(0)
+            max_sim = torch.empty((b, f), dtype=torch.int64, device=self.device) 
         d = input.size(-1)
 
         # Since we only target MAP, inverse of a vector itself
@@ -204,10 +266,14 @@ class Resonator(nn.Module):
         for i in range(1, f):
             rolled.append(estimates.roll(i, -2))
 
-        estimates = torch.stack(rolled, dim=-2)
+        if rolled:
+            inv_estimates = torch.stack(rolled, dim=-2)
+        else:
+            # rolled is empty, i.e. only one factor
+            inv_estimates = torch.empty((*estimates.shape[:-2], 0, d))
 
         # First bind all the other estimates together: z * y, x * z, y * z
-        inv_others = VSA.multibind(estimates)
+        inv_others = VSA.multibind(inv_estimates)
 
         # Then unbind all other estimates from the input: s * (x * y), s * (x * z), s * (y * z)
         new_estimates = VSA.bind(input.unsqueeze(-2), inv_others)
@@ -227,11 +293,9 @@ class Resonator(nn.Module):
         if (type(codebooks) == list):
             # f elements, each is tensor of (b, v)
             similarity = [None] * f
-            output = torch.empty((b, f, d), dtype=input.dtype, device=input.device)
-            max_sim = torch.empty((b, f), dtype=torch.int64, device=self.device)
             for i in range(f):
                 # All batches, the i-th factor compared with the i-th codebook
-                similarity[i] = VSA.dot_similarity(new_estimates[:,i], _codebooks[i]) 
+                similarity[i] = VSA.dot_similarity(new_estimates[...,i,:], _codebooks[i]) 
 
                 # Apply stochasticity
                 if (stoch == "SIMILARITY"):
@@ -265,9 +329,8 @@ class Resonator(nn.Module):
                         similarity[i] = torch.nn.Threshold(0, 0)(similarity[i]) >> shift
                 
                 # Dot Product with the respective weights and sum
-                output[:,i] = VSA.multiset(codebooks[i], similarity[i], quantize=True)
-
-                max_sim[:,i] = torch.max(similarity[i], dim=-1)[0]
+                estimates[...,i,:] = VSA.multiset(codebooks[i], similarity[i], quantize=True)
+                max_sim[...,i] = torch.max(similarity[i], dim=-1)[0]
         else:
             similarity = VSA.dot_similarity(new_estimates, _codebooks)
 
@@ -303,11 +366,10 @@ class Resonator(nn.Module):
                     similarity = torch.nn.Threshold(0, 0)(similarity) >> shift
 
             # Dot Product with the respective weights and sum
-            output = VSA.multiset(codebooks, similarity, quantize=True)
-
+            estimates = VSA.multiset(codebooks, similarity, quantize=True)
             max_sim = torch.max(similarity, dim=-1)[0]
         
-        return output, max_sim
+        return estimates, max_sim
 
     def get_init_estimates(self, codebooks = None, quantize = True) -> Tensor:
         """
