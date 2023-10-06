@@ -89,42 +89,82 @@ class VSA:
         print("Done. Saved to", file)
         return l
 
-    def cleanup(self, inputs: Tensor, codebooks: Tensor or List[Tensor] = None, abs = True):
+    def cleanup(self, inputs: Tensor, codebooks: Tensor or List[Tensor] = None, abs = False):
         '''
-        input: `(b, f, d)` :tensor. b is batch size, f is number of factors, d is dimension
-        Return: List[Tuple(int)] of length b
+        input: `(b*, f*, d)` :tensor
+        codebooks: `(f*, n, d)` :tensor or list
+        Return: List[Tuple(int)] of length b, similarity
         `inputs` must be quantized
         '''
         if codebooks == None:
             codebooks = self.codebooks
-        
-        if type(codebooks) == list:
-            winners = torch.empty((inputs.size(0), len(codebooks)), dtype=torch.int32, device=self.device)
-            for i in range(len(codebooks)):
-                if abs:
-                    winners[:,i] = torch.argmax(torch.abs(self.dot_similarity(inputs[:,i], codebooks[i])), -1)
-                else:
-                    winners[:,i] = torch.argmax(self.dot_similarity(inputs[:,i], codebooks[i]), -1)
-            return [tuple(winners[i].tolist()) for i in range(winners.size(0))]
-        else:
-            if abs:
-                winners = torch.argmax(torch.abs(self.dot_similarity(inputs, codebooks)), -1)
+
+        if inputs.dim() == 1 and (type(codebooks) == Tensor and codebooks.dim() == 2 or type(codebooks) == list and len(codebooks) == 1 and codebooks[0].dim() == 2):
+            # Input is a single vector, so must be a single codebook (tensor)
+            winners = torch.empty(len(codebooks), dtype=torch.int64, device=self.device)
+            winner_sims = torch.empty(len(codebooks), dtype=torch.int64, device=self.device)
+            if type(codebooks) == list:
+                for i in range(len(codebooks)):
+                    similarities = self.dot_similarity(inputs, codebooks[i])
+                    similarities = torch.abs(similarities) if abs else similarities
+                    winners[i] = torch.argmax(similarities, -1)
+                    winner_sims[i] = similarities[winners[i]]
             else:
-                winners = torch.argmax(self.dot_similarity(inputs, codebooks), -1)
-            return [tuple(winners[i].tolist()) for i in range(winners.size(0))]
+                similarities = self.dot_similarity(inputs, codebooks)
+                similarities = torch.abs(similarities) if abs else similarities
+                winners = torch.argmax(similarities, -1)
+                winner_sims = similarities.gather(-1, winners)
+
+            return tuple(winners.tolist()), winner_sims.tolist()
+        elif inputs.dim() >= 2 and (type(codebooks) == list and codebooks[0].dim() == 2 or codebooks.dim() == 3):
+            # Input is (b, f, d) or (f, d)
+            # winners shape = (b, f) or (f) [if b isn't given]
+            winners = torch.empty((*inputs.shape[:-2], len(codebooks)), dtype=torch.int64, device=self.device)
+            winner_sims = torch.empty((*inputs.shape[:-2], len(codebooks)), dtype=torch.int64, device=self.device)
+            if type(codebooks) == list:
+                for i in range(len(codebooks)):
+                    similarities = self.dot_similarity(inputs[..., i, :], codebooks[i])
+                    similarities = torch.abs(similarities) if abs else similarities
+                    winners[...,i] = torch.argmax(similarities, -1)
+                    # Not sure what's a better code style for this
+                    try:
+                        winner_sims[...,i] = similarities.gather(-1, winners[...,i])
+                    except:
+                        winner_sims[...,i] = similarities.gather(-1, winners[...,i].unsqueeze(0))[:,0]
+            else:
+                similarities = self.dot_similarity(inputs, codebooks)
+                similarities = torch.abs(similarities) if abs else similarities
+                winners = torch.argmax(similarities, -1)
+                winner_sims = similarities.gather(-1, winners)
+
+            # Innermost dimension is the factor index, must be tuple
+            if (winners.dim() > 1):
+                winners = [tuple(winners[i].tolist()) for i in range(winners.size(0))]
+            else:
+                winners = tuple(winners.tolist())
+                # winners[..., :]
+            return winners, winner_sims.tolist()
+        else:
+            raise NotImplementedError("Not implemented for this shape")
+
       
-    def _get_vector(self, key:tuple):
+    def _get_vector(self, key: tuple, codebooks = None):
         '''
         `key` is a tuple of indices of each factor
         Instead of pre-generate the dictionary, we combine factors to get the vector on the fly
         This saves memory, and also the dictionary lookup is only used during sampling and comparison
-        The vector doesn't need to be composed of all available factors. Only the first n codebooks
-        are used when the key length is n.
+        The vector doesn't need to be composed of all available factors. Factors that are None are not bound.
         '''
-        factors = torch.stack([self.codebooks[i][key[i]] for i in range(len(key))])
+        if codebooks == None:
+            codebooks = self.codebooks
+        factors = []
+        for i in range(len(key)):
+            if key[i] != None:
+                factors.append(codebooks[i][key[i]])
+        factors = torch.stack(factors)
         return self.multibind(factors).to(self.device)
 
-    def get_vector(self, key: list or tuple, quantize = False):
+    def get_vector(self, key: list or tuple, codebooks = None, quantize = False):
         '''
         `key` is a list of tuples in [(f0, f1, f2, ...), ...] format, or a single tuple
         fx is the index of the codevector in a codebook, which is also its label.
@@ -136,9 +176,9 @@ class VSA:
         '''
         
         if (type(key) == tuple):
-            return self._get_vector(key)
+            return self._get_vector(key, codebooks)
         else:
-            return self.multiset(torch.stack([self._get_vector(key[i]) for i in range(len(key))]), quantize=quantize)
+            return self.multiset(torch.stack([self._get_vector(key[i], codebooks) for i in range(len(key))]), quantize=quantize)
 
     @classmethod
     def empty(cls, size: tuple or torch.Size or int, dtype=None, device=None) -> Tensor:
@@ -173,6 +213,9 @@ class VSA:
         """
         In hardware mode, caller must make sure self is quantized
         """
+        if others.nelement() == 0:
+            return input.clone()
+
         if cls.mode == "SOFTWARE":
             return torch.mul(input, others)
         elif cls.mode == "HARDWARE":
