@@ -126,16 +126,16 @@ class VSA:
                     similarities = self.dot_similarity(inputs[..., i, :], codebooks[i])
                     similarities = torch.abs(similarities) if abs else similarities
                     winners[...,i] = torch.argmax(similarities, -1)
-                    # Not sure what's a better code style for this
+                    # Not sure what's a better code style for this, but required for gather to support different shapes
                     try:
                         winner_sims[...,i] = similarities.gather(-1, winners[...,i])
                     except:
-                        winner_sims[...,i] = similarities.gather(-1, winners[...,i].unsqueeze(0))[:,0]
+                        winner_sims[...,i] = similarities.gather(-1, winners[...,i].unsqueeze(-1))[:,0]
             else:
                 similarities = self.dot_similarity(inputs, codebooks)
                 similarities = torch.abs(similarities) if abs else similarities
                 winners = torch.argmax(similarities, -1)
-                winner_sims = similarities.gather(-1, winners)
+                winner_sims = similarities.gather(-1, winners.unsqueeze(-1))
 
             # Innermost dimension is the factor index, must be tuple
             if (winners.dim() > 1):
