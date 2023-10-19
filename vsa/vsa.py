@@ -28,11 +28,12 @@ class VSA:
             dim: int,
             num_factors: int,
             num_codevectors: int or Tuple[int], # number of vectors per factor, or tuple of number of codevectors for each factor
+            codebooks: str = None,
             fold_dim: int = 256,
             ehd_bits: int = 8, 
             sim_bits: int = 13, 
             seed: None or int = None,  # random seed
-            device = "cpu"
+            device = None 
         ):
 
         VSA.mode = mode
@@ -54,13 +55,17 @@ class VSA:
             torch.manual_seed(seed)
 
         # Generate codebooks
-        file = os.path.join(self.root, "codebooks.pt")
-        if os.path.exists(file):
-            print(f"Loading codebooks from {file}")
-            self.codebooks = torch.load(file, map_location=self.device)
+        if codebooks is not None:
+            print(f"Loading codebooks from {codebooks}")
+            self.codebooks = torch.load(codebooks, map_location=self.device)
         else:
-            print("Generating codebooks...", end="")
-            self.codebooks = self.gen_codebooks(file)
+            file = os.path.join(self.root, "codebooks.pt")
+            if os.path.exists(file):
+                print(f"Loading codebooks from {file}")
+                self.codebooks = torch.load(file, map_location=self.device)
+            else:
+                print("Generating codebooks...", end="")
+                self.codebooks = self.gen_codebooks(file)
 
     def gen_codebooks(self, file) -> List[Tensor] or Tensor:
         # All factors have the same number of vectors

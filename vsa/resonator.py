@@ -49,11 +49,11 @@ class Resonator(nn.Module):
         # Pre-generate a set of noise tensors; had to put it here to accomondate the case where partial codebooks are used
         if self.mode == "HARDWARE" and Resonator.noise == None:
             if (self.stoch == "SIMILARITY"):
-                Resonator.noise = (torch.normal(0, self.vsa.dim, (1659,)) * self.randomness).to(self.device).type(torch.int64)
+                Resonator.noise = (torch.normal(0, input.size(-1), (1659,)) * self.randomness).to(self.device).type(torch.int64)
                 assert(len(Resonator.noise) > sum([codebooks[i].size(0) for i in range(len(codebooks))]))
 
             elif (self.stoch == "VECTOR"):
-                Resonator.noise = torch.rand(200, self.vsa.dim, device=self.device) < self.randomness
+                Resonator.noise = torch.rand(200, input.size(-1), device=self.device) < self.randomness
                 # To mimic hardware, retrict the number of noise vectors we store in memory. The more we store the closer it is to a true random model.
                 # The minimum required is the number of codevectors in the longest codebook so that in each iteration each codevector is applied with different noise
                 assert(Resonator.noise.size(0) >= max([len(codebooks[i]) for i in range(len(codebooks))]))
@@ -105,14 +105,14 @@ class Resonator(nn.Module):
                 # TODO make this a config option
                 # If the similarity value for any factor exceeds the threshold, stop the loop
                 if max_sim.dim() == 1:
-                    early_converge = (torch.max(max_sim, dim=-1)[0] > int(self.vsa.dim * self.early_converge)).item()
+                    early_converge = (torch.max(max_sim, dim=-1)[0] > int(input.size(-1) * self.early_converge)).item()
                 else:
-                    early_converge = all((torch.max(max_sim, dim=-1)[0] > int(self.vsa.dim * self.early_converge)).tolist())
+                    early_converge = all((torch.max(max_sim, dim=-1)[0] > int(input.size(-1) * self.early_converge)).tolist())
                 if early_converge:
                     converge_status = "EARLY"
                     break
                 # If the similarity of all factors exceed the treshold, stop the loop
-                # if all((max_sim.flatten() > int(self.vsa.dim * self.early_converge)).tolist()):
+                # if all((max_sim.flatten() > int(input.size(-1) * self.early_converge)).tolist()):
                 #     break
             # Absolute convergence is signified by identical estimates in consecutive iterations
             # Sometimes RN can enter "bistable" state where estiamtes are flipping polarity every iteration.
@@ -180,7 +180,7 @@ class Resonator(nn.Module):
             # Apply stochasticity
             if (stoch == "SIMILARITY"):
                 if (self.mode == "SOFTWARE"):
-                    similarity += (torch.normal(0, self.vsa.dim, similarity.shape) * randomness).to(self.device).type(torch.int64)
+                    similarity += (torch.normal(0, input.size(-1), similarity.shape) * randomness).to(self.device).type(torch.int64)
                 elif (self.mode == "HARDWARE"):
                     similarity += Resonator.noise[0:_codebook.size(0)]
                     Resonator.noise = Resonator.noise.roll(-_codebook.size(0), -1)
@@ -300,7 +300,7 @@ class Resonator(nn.Module):
                 # Apply stochasticity
                 if (stoch == "SIMILARITY"):
                     if (self.mode == "SOFTWARE"):
-                        similarity[i] += (torch.normal(0, self.vsa.dim, similarity[i].shape) * randomness).type(torch.int64)
+                        similarity[i] += (torch.normal(0, input.size(-1), similarity[i].shape) * randomness).type(torch.int64)
                     elif (self.mode == "HARDWARE"):
                         similarity[i] += Resonator.noise[0:_codebooks[i].size(0)]
                         Resonator.noise = Resonator.noise.roll(-_codebooks[i].size(0), -1)
@@ -337,7 +337,7 @@ class Resonator(nn.Module):
             # Apply stochasticity
             if (stoch == "SIMILARITY"):
                 if (self.mode == "SOFTWARE"):
-                    similarity += (torch.normal(0, self.vsa.dim, similarity.shape) * randomness).type(torch.int64)
+                    similarity += (torch.normal(0, input.size(-1), similarity.shape) * randomness).type(torch.int64)
                 elif (self.mode == "HARDWARE"):
                     similarity += Resonator.noise[0:_codebooks.size(1)*f].view(f, _codebooks.size(1))
                     Resonator.noise = Resonator.noise.roll(-_codebooks.size(1)*f, -1)
