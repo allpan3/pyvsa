@@ -58,7 +58,9 @@ class Resonator(nn.Module):
                 # The minimum required is the number of codevectors in the longest codebook so that in each iteration each codevector is applied with different noise
                 assert(Resonator.noise.size(0) >= max([len(codebooks[i]) for i in range(len(codebooks))]))
 
-        estimates, iter, converge = self.resonator_network(input, init_estimates, codebooks)
+        with torch.profiler.record_function("rn_core"):
+            estimates, iter, converge = self.resonator_network(input, init_estimates, codebooks)
+
         # outcome: the indices of the codevectors in the codebooks
         outcome, similarity = self.vsa.cleanup(estimates, codebooks, self.argmax_abs)
 
@@ -96,10 +98,11 @@ class Resonator(nn.Module):
         # TODO separate status for each batch
         converge_status = False
         for k in range(self.iterations):
-            if (self.resonator_type == "SEQUENTIAL"):
-                estimates, max_sim = self.resonator_stage_seq(input, estimates, codebooks, self.activation, self.act_val, self.stoch, self.randomness)
-            elif (self.resonator_type == "CONCURRENT"):
-                estimates, max_sim = self.resonator_stage_concur(input, estimates, codebooks, self.activation, self.act_val, self.stoch, self.randomness)
+            with torch.profiler.record_function("rn_iter"):
+                if (self.resonator_type == "SEQUENTIAL"):
+                    estimates, max_sim = self.resonator_stage_seq(input, estimates, codebooks, self.activation, self.act_val, self.stoch, self.randomness)
+                elif (self.resonator_type == "CONCURRENT"):
+                    estimates, max_sim = self.resonator_stage_concur(input, estimates, codebooks, self.activation, self.act_val, self.stoch, self.randomness)
 
             if (self.early_converge):
                 # TODO make this a config option
@@ -187,16 +190,8 @@ class Resonator(nn.Module):
 
             # Apply activation
             if (activation == 'THRESHOLD'):
-                # Wipe out all values below the threshold
-                if self.mode == "SOFTWARE":
-                    similarity = torch.nn.Threshold(act_val, 0)(similarity)
-                elif self.mode == "HARDWARE":
-                    # In hardware mode, threshold must be a power of 2
-                    try:
-                        exp = round(math.log2(act_val))
-                    except:
-                        exp = 0
-                    similarity = torch.nn.Threshold(2 ** exp - 1, 0)(similarity)
+                # Wipe out all values below the threshold. Values equal to threshold should stay intact, the same way how we do in hardware
+                similarity = torch.nn.Threshold(act_val-1, 0)(similarity)
             elif (activation == 'SCALEDOWN'):
                 # Sacle down has the similar effect of hardshrink as small values are even smaller. It scales down the large values, which doesn't matter
                 # Note that early convergence threshold value also needs to be scaled accordingly
@@ -307,14 +302,7 @@ class Resonator(nn.Module):
 
                 # Apply activation; see resonator_stage_seq for detailed comments
                 if (activation == 'THRESHOLD'):
-                    if self.mode == "SOFTWARE":
-                        similarity[i] = torch.nn.Threshold(act_val, 0)(similarity[i])
-                    elif self.mode == "HARDWARE":
-                        try:
-                            exp = round(math.log2(act_val))
-                        except:
-                            exp = 0
-                        similarity[i] = torch.nn.Threshold(2 ** exp - 1, 0)(similarity[i])
+                    similarity = torch.nn.Threshold(act_val-1, 0)(similarity[i])
                 elif (activation == 'SCALEDOWN'):
                     if self.mode == "SOFTWARE":
                         similarity[i] = similarity[i] // act_val
@@ -344,14 +332,7 @@ class Resonator(nn.Module):
 
             # Apply activation; see resonator_stage_seq for detailed comments
             if (activation == 'THRESHOLD'):
-                if self.mode == "SOFTWARE":
-                    similarity = torch.nn.Threshold(act_val, 0)(similarity)
-                elif self.mode == "HARDWARE":
-                    try:
-                        exp = round(math.log2(act_val))
-                    except:
-                        exp = 0
-                    similarity = torch.nn.Threshold(2 ** exp - 1, 0)(similarity)
+                similarity = torch.nn.Threshold(act_val-1, 0)(similarity)
             elif (activation == 'SCALEDOWN'):
                 if self.mode == "SOFTWARE":
                     similarity = similarity // act_val
