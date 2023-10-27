@@ -43,7 +43,15 @@ class VSA:
         VSA.min_sim = -2 ** sim_bits
         VSA.fold_dim = fold_dim
 
-        assert(dim % fold_dim == 0)
+        if VSA.mode == "HARDWARE":
+            assert(dim % fold_dim == 0)
+            # In hardware mode, we use int16 to avoid type conversion for EHD and similarity (which are generally below 16 bits)
+            VSA.dtype = torch.int16
+        elif VSA.mode == "SOFTWARE":
+            # Based on some preliminary experiments, float32 is faster than int32 because no type conversion needed for maymul (multiset, dot similarity)
+            # On CPU where type conversion is not needed, performance is almost the same so we use float32 for consistency
+            # VSA.dtype = torch.int32
+            VSA.dtype = torch.float32
 
         self.root = root
         self.dim = dim
@@ -106,41 +114,41 @@ class VSA:
 
         if inputs.dim() == 1 and (type(codebooks) == Tensor and codebooks.dim() == 2 or type(codebooks) == list and len(codebooks) == 1 and codebooks[0].dim() == 2):
             # Input is a single vector, so must be a single codebook (tensor)
-            winners = torch.empty(len(codebooks), dtype=torch.int64, device=self.device)
-            winner_sims = torch.empty(len(codebooks), dtype=torch.int64, device=self.device)
+            winners = torch.empty(len(codebooks), dtype=torch.int64, device=self.device)      # gather requires int64 for index
+            # Commented out the winner_sims because they are not currently used and gather adds huge overhead especially for uneven codebooks with low batch number
+            # winner_sims = torch.empty(len(codebooks), dtype=inputs.dtype, device=self.device)
             if type(codebooks) == list:
                 for i in range(len(codebooks)):
                     similarities = self.dot_similarity(inputs, codebooks[i])
                     similarities = torch.abs(similarities) if abs else similarities
                     winners[i] = torch.argmax(similarities, -1)
-                    winner_sims[i] = similarities[winners[i]]
+                    # winner_sims[i] = similarities[winners[i]]
             else:
                 similarities = self.dot_similarity(inputs, codebooks)
                 similarities = torch.abs(similarities) if abs else similarities
                 winners = torch.argmax(similarities, -1)
-                winner_sims = similarities.gather(-1, winners)
+                # winner_sims = similarities.gather(-1, winners)
 
-            return tuple(winners.tolist()), winner_sims.tolist()
+            return tuple(winners.tolist())
         elif inputs.dim() >= 2 and (type(codebooks) == list and codebooks[0].dim() == 2 or codebooks.dim() == 3):
             # Input is (b, f, d) or (f, d)
             # winners shape = (b, f) or (f) [if b isn't given]
             winners = torch.empty((*inputs.shape[:-2], len(codebooks)), dtype=torch.int64, device=self.device)
-            winner_sims = torch.empty((*inputs.shape[:-2], len(codebooks)), dtype=torch.int64, device=self.device)
+            # winner_sims = torch.empty((*inputs.shape[:-2], len(codebooks)), dtype=inputs.dtype, device=self.device)
             if type(codebooks) == list:
                 for i in range(len(codebooks)):
                     similarities = self.dot_similarity(inputs[..., i, :], codebooks[i])
                     similarities = torch.abs(similarities) if abs else similarities
                     winners[...,i] = torch.argmax(similarities, -1)
-                    # Not sure what's a better code style for this, but required for gather to support different shapes
-                    try:
-                        winner_sims[...,i] = similarities.gather(-1, winners[...,i])
-                    except:
-                        winner_sims[...,i] = similarities.gather(-1, winners[...,i].unsqueeze(-1))[:,0]
+                    # if similarities.dim() == 2:
+                    #     winner_sims[...,i] = similarities.gather(-1, winners[...,i].unsqueeze(-1))[:,0]
+                    # else:
+                    #     winner_sims[...,i] = similarities.gather(-1, winners[...,i])
             else:
                 similarities = self.dot_similarity(inputs, codebooks)
                 similarities = torch.abs(similarities) if abs else similarities
                 winners = torch.argmax(similarities, -1)
-                winner_sims = similarities.gather(-1, winners.unsqueeze(-1))
+                # winner_sims = similarities.gather(-1, winners.unsqueeze(-1))
 
             # Innermost dimension is the factor index, must be tuple
             if (winners.dim() > 1):
@@ -148,7 +156,7 @@ class VSA:
             else:
                 winners = tuple(winners.tolist())
                 # winners[..., :]
-            return winners, winner_sims.tolist()
+            return winners
         else:
             raise NotImplementedError("Not implemented for this shape")
 
@@ -191,8 +199,9 @@ class VSA:
             size: (b, n) or (n) or n    (Exclude vector dimension)
             dimensions: d
         """
+        # Hardware by default uses int16 in order to support EHD and similarity (which are generally below 16 bits) without type conversion
         if dtype is None:
-            dtype = torch.int8
+            dtype = VSA.dtype
 
         return torch.empty(size, dtype=dtype, device=device)
 
@@ -202,7 +211,7 @@ class VSA:
             size: (b, n, d) or (n, d) or (d) or d    (Exclude vector dimension)
         """
         if dtype is None:
-            dtype = torch.int8
+            dtype = VSA.dtype
 
         select = torch.empty(size, dtype=torch.bool, device=device)
         select.bernoulli_(generator=None)
@@ -246,7 +255,7 @@ class VSA:
             return int("1" + (len(bin(n)) - 3) * "0", 2)
 
         if cls.mode == "SOFTWARE":
-            result = torch.prod(inputs, dim=-2)
+            result = torch.prod(inputs, dim=-2, dtype=inputs.dtype)
             return result
         elif cls.mode == "HARDWARE":
             n = inputs.size(-2)
@@ -317,10 +326,14 @@ class VSA:
 
         elif cls.mode == "SOFTWARE":
             if weights != None:
-                # Add a dimension to weights so that each weight value is applied to all dimensions of the vector
-                result = torch.matmul(weights.unsqueeze(-2).type(torch.float32), inputs.type(torch.float32)).squeeze(-2).type(torch.int64)
+                if inputs.device.type == "cuda":
+                    # CUDA only supports float32 for matmul 
+                    result = torch.matmul(weights.unsqueeze(-2).type(torch.float32), inputs.type(torch.float32)).squeeze(-2).type(VSA.dtype)
+                else:
+                    # Add a dimension to weights so that each weight value is applied to all dimensions of the vector
+                    result = torch.matmul(weights.unsqueeze(-2), inputs).squeeze(-2)
             else:
-                result = torch.sum(inputs, dim=-2, dtype=torch.int64) 
+                result = torch.sum(inputs, dim=-2, dtype=VSA.dtype) 
 
 
         if quantize:
@@ -339,30 +352,43 @@ class VSA:
                 - n = vectors [optional], v each of the n vectors in self is compared to v vectors
                 - n must match the n in self [optional], v is the number of vectors to compare against each of the n vectors in self [optional]
         """
-
         if cls.mode == "SOFTWARE":
             if (input.dim() >= 2 and others.dim() == 3):
                 assert(others.size(0) == input.size(-2))
                 # input is (b*, n, d) and others is (n, v, d)
-                result = torch.matmul(input.unsqueeze(-2).type(torch.float32), others.transpose(-2,-1).type(torch.float32)).squeeze(-2)
+                if input.device.type == "cuda":
+                    # CUDA only supports float32 for matmul 
+                    result = torch.matmul(input.unsqueeze(-2).type(torch.float32), others.transpose(-2,-1).type(torch.float32)).squeeze(-2).type(VSA.dtype)
+                else:
+                    result = torch.matmul(input.unsqueeze(-2), others.transpose(-2,-1)).squeeze(-2)
             elif (input.dim() >= 1 and others.dim() == 2):
                 # input is (b*, d) and others is (v, d)
-                result = torch.matmul(input.unsqueeze(-2).type(torch.float32), others.transpose(-2,-1).type(torch.float32)).squeeze(-2)
+                if input.device.type == "cuda":
+                    # CUDA only supports float32 for matmul 
+                    result = torch.matmul(input.unsqueeze(-2).type(torch.float32), others.transpose(-2,-1).type(torch.float32)).squeeze(-2).type(VSA.dtype)
+                else:
+                    result = torch.matmul(input.unsqueeze(-2), others.transpose(-2,-1)).squeeze(-2)
             elif (input.dim() >= 1 and others.dim() == 1):
                 # input is (b*, d) and others is (d)
-                result = torch.matmul(input.type(torch.float32), others.type(torch.float32))
+                if input.device.type == "cuda":
+                    # CUDA only supports float32 for matmul 
+                    result = torch.matmul(input.type(torch.float32), others.type(torch.float32)).type(VSA.dtype)
+                else:
+                    result = torch.matmul(input, others)
             else:
                 raise NotImplementedError("Not implemented for this case")
 
-            return result.to(torch.int64)
+            return result.type(VSA.dtype)
         elif cls.mode == "HARDWARE":
+            positive = torch.tensor(1, dtype=input.dtype, device=input.device)
+            negative = torch.tensor(-1, dtype=input.dtype, device=input.device)
             if (input.dim() >= 2 and others.dim() == 3):
                 # input is (b*, n, d) and others is (n, v, d)
                 assert(others.size(0) == input.size(-2))
-                popcount = torch.where(input.unsqueeze(-2) == others, 1, -1)
+                popcount = torch.where(input.unsqueeze(-2) == others, positive, negative)
             elif (input.dim() >= 1 and others.dim() == 2):
                 # input is (b*, d) and others is (v, d)
-                popcount = torch.where(input.unsqueeze(-2) == others, 1, -1)
+                popcount = torch.where(input.unsqueeze(-2) == others, positive, negative)
             elif (input.dim() >= 1 and others.dim() == 1):
                 # input is (b*, d) and others is (d)
                 popcount = torch.where(input == others, 1, -1)
@@ -370,7 +396,7 @@ class VSA:
                 raise NotImplementedError("Not implemented for this case")
                 # popcount = torch.where(input == others, 1, -1)
             
-            result = torch.sum(popcount, dim=-1, dtype=torch.int64)
+            result = torch.sum(popcount, dim=-1, dtype=VSA.dtype)
             # Clipping
             result = torch.where(result > VSA.max_sim, VSA.max_sim, result)
             result = torch.where(result < VSA.min_sim, VSA.min_sim, result)
@@ -490,9 +516,9 @@ class VSA:
         """For hardware mode, this function may not work correctly because an expanded vector
            may potentially be all 0's and 1's, especially if it underwent subtraction"""
         if cls.mode == "SOFTWARE":
-            return all(torch.logical_or(input == 1, input == -1).flatten().tolist())
+            return torch.logical_or(input == 1, input == -1).all()
         elif cls.mode == "HARDWARE":
-            return all(torch.logical_or(input == 1, input == 0).flatten().tolist())
+            return torch.logical_or(input == 1, input == 0).all()
 
     @classmethod
     def energy(cls, input: Tensor) -> Tensor:
