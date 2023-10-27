@@ -328,9 +328,9 @@ class VSA:
         elif cls.mode == "SOFTWARE":
             if weights != None:
                 # CUDA only supports float32 for matmul
-                result = torch.matmul(weights.unsqueeze(-2).type(torch.float32), inputs.type(torch.float32)).squeeze(-2).type(VSA.dtype)
+                result = torch.matmul(weights.unsqueeze(-2).type(torch.float32), inputs.type(torch.float32)).squeeze(-2).type(input.dtype)
             else:
-                result = torch.sum(inputs, dim=-2, dtype=VSA.dtype) 
+                result = torch.sum(inputs, dim=-2, dtype=input.dtype) 
 
         if quantize:
             result = cls.quantize(result)
@@ -353,19 +353,19 @@ class VSA:
                 assert(others.size(0) == input.size(-2))
                 # input is (b*, n, d) and others is (n, v, d)
                 # CUDA only supports float32 for matmul 
-                result = torch.matmul(input.unsqueeze(-2).type(torch.float32), others.transpose(-2,-1).type(torch.float32)).squeeze(-2).type(VSA.dtype)
+                result = torch.matmul(input.unsqueeze(-2).type(torch.float32), others.transpose(-2,-1).type(torch.float32)).squeeze(-2).type(input.dtype)
             elif (input.dim() >= 1 and others.dim() == 2):
                 # input is (b*, d) and others is (v, d)
                 # CUDA only supports float32 for matmul 
-                result = torch.matmul(input.unsqueeze(-2).type(torch.float32), others.transpose(-2,-1).type(torch.float32)).squeeze(-2).type(VSA.dtype)
+                result = torch.matmul(input.unsqueeze(-2).type(torch.float32), others.transpose(-2,-1).type(torch.float32)).squeeze(-2).type(input.dtype)
             elif (input.dim() >= 1 and others.dim() == 1):
                 # input is (b*, d) and others is (d)
                 # CUDA only supports float32 for matmul 
-                result = torch.matmul(input.type(torch.float32), others.type(torch.float32)).type(VSA.dtype)
+                result = torch.matmul(input.type(torch.float32), others.type(torch.float32)).type(input.dtype)
             else:
                 raise NotImplementedError("Not implemented for this case")
 
-            return result.type(VSA.dtype)
+            return result.type(input.dtype)
         elif cls.mode == "HARDWARE":
             positive = torch.tensor(1, dtype=input.dtype, device=input.device)
             negative = torch.tensor(-1, dtype=input.dtype, device=input.device)
@@ -383,7 +383,7 @@ class VSA:
                 raise NotImplementedError("Not implemented for this case")
                 # popcount = torch.where(input == others, 1, -1)
             
-            result = torch.sum(popcount, dim=-1, dtype=VSA.dtype)
+            result = torch.sum(popcount, dim=-1, dtype=input.dtype)
             # Clipping
             result = torch.where(result > VSA.max_sim, VSA.max_sim, result)
             result = torch.where(result < VSA.min_sim, VSA.min_sim, result)

@@ -35,59 +35,59 @@ class Resonator(nn.Module):
                    `known` should only be supplied when codebooks is also supplied  
                    The same `known` is used by all batches
         """
-        # If known is given, unbind the known factors from input and run resonator network with the rest
-        if known is not None:
-            assert(codebooks is not None)
-            assert(len(known) == len(self.vsa.codebooks))
-            known_vector = torch.stack([self.vsa.codebooks[i][known[i]] for i in range(len(known)) if known[i] is not None])
-            known_vector = self.vsa.multibind(known_vector)
-            input = self.vsa.bind(input, known_vector)
-
-        if codebooks is None:
-            codebooks = self.vsa.codebooks
-
-        # Pre-generate a set of noise tensors; had to put it here to accomondate the case where partial codebooks are used
-        if self.mode == "HARDWARE" and Resonator.noise == None:
-            if (self.stoch == "SIMILARITY"):
-                Resonator.noise = (torch.normal(0, input.size(-1), (1659,)) * self.randomness).to(self.device).type(torch.int64)
-                assert(len(Resonator.noise) > sum([codebooks[i].size(0) for i in range(len(codebooks))]))
-
-            elif (self.stoch == "VECTOR"):
-                Resonator.noise = torch.rand(200, input.size(-1), device=self.device) < self.randomness
-                # To mimic hardware, retrict the number of noise vectors we store in memory. The more we store the closer it is to a true random model.
-                # The minimum required is the number of codevectors in the longest codebook so that in each iteration each codevector is applied with different noise
-                assert(Resonator.noise.size(0) >= max([len(codebooks[i]) for i in range(len(codebooks))]))
-
         with torch.profiler.record_function("rn_core"):
+            # If known is given, unbind the known factors from input and run resonator network with the rest
+            if known is not None:
+                assert(codebooks is not None)
+                assert(len(known) == len(self.vsa.codebooks))
+                known_vector = torch.stack([self.vsa.codebooks[i][known[i]] for i in range(len(known)) if known[i] is not None])
+                known_vector = self.vsa.multibind(known_vector)
+                input = self.vsa.bind(input, known_vector)
+
+            if codebooks is None:
+                codebooks = self.vsa.codebooks
+
+            # Pre-generate a set of noise tensors; had to put it here to accomondate the case where partial codebooks are used
+            if self.mode == "HARDWARE" and Resonator.noise == None:
+                if (self.stoch == "SIMILARITY"):
+                    Resonator.noise = (torch.normal(0, input.size(-1), (1659,), device=self.device) * self.randomness).type(torch.int16)
+                    assert(len(Resonator.noise) > sum([codebooks[i].size(0) for i in range(len(codebooks))]))
+
+                elif (self.stoch == "VECTOR"):
+                    Resonator.noise = torch.rand(200, input.size(-1), device=self.device) < self.randomness
+                    # To mimic hardware, retrict the number of noise vectors we store in memory. The more we store the closer it is to a true random model.
+                    # The minimum required is the number of codevectors in the longest codebook so that in each iteration each codevector is applied with different noise
+                    assert(Resonator.noise.size(0) >= max([len(codebooks[i]) for i in range(len(codebooks))]))
+
             estimates, iter, converge = self.resonator_network(input, init_estimates, codebooks)
 
-        # outcome: the indices of the codevectors in the codebooks
-        outcome, similarity = self.vsa.cleanup(estimates, codebooks, self.argmax_abs)
+            # outcome: the indices of the codevectors in the codebooks
+            outcome  = self.vsa.cleanup(estimates, codebooks, self.argmax_abs)
 
-        # Insert the known vectors into the outcome
-        if known is not None:
-            if input.dim() == 1:
-                _outcome = list(known)
-                k = 0
-                for j in range(len(_outcome)):
-                    if _outcome[j] is None:
-                        _outcome[j] = outcome[k]
-                        k += 1
-                outcome = tuple(_outcome)
-            else:
-                # per-batch
-                for i in range(len(outcome)):
+            # Insert the known vectors into the outcome
+            if known is not None:
+                if input.dim() == 1:
                     _outcome = list(known)
                     k = 0
                     for j in range(len(_outcome)):
                         if _outcome[j] is None:
-                            _outcome[j] = outcome[i][k]
+                            _outcome[j] = outcome[k]
                             k += 1
-                    outcome[i] = tuple(_outcome)
+                    outcome = tuple(_outcome)
+                else:
+                    # per-batch
+                    for i in range(len(outcome)):
+                        _outcome = list(known)
+                        k = 0
+                        for j in range(len(_outcome)):
+                            if _outcome[j] is None:
+                                _outcome[j] = outcome[i][k]
+                                k += 1
+                        outcome[i] = tuple(_outcome)
 
-        # Reorder the outcome to the original codebook order
-        if (orig_indices != None):
-            outcome = [tuple([outcome[j][i] for i in orig_indices]) for j in range(len(outcome))]
+            # Reorder the outcome to the original codebook order
+            if (orig_indices != None):
+                outcome = [tuple([outcome[j][i] for i in orig_indices]) for j in range(len(outcome))]
 
         return outcome, iter, converge
 
@@ -104,28 +104,24 @@ class Resonator(nn.Module):
                 elif (self.resonator_type == "CONCURRENT"):
                     estimates, max_sim = self.resonator_stage_concur(input, estimates, codebooks, self.activation, self.act_val, self.stoch, self.randomness)
 
-            if (self.early_converge):
-                # TODO make this a config option
-                # If the similarity value for any factor exceeds the threshold, stop the loop
-                if max_sim.dim() == 1:
-                    early_converge = (torch.max(max_sim, dim=-1)[0] > int(input.size(-1) * self.early_converge)).item()
-                else:
-                    early_converge = all((torch.max(max_sim, dim=-1)[0] > int(input.size(-1) * self.early_converge)).tolist())
-                if early_converge:
-                    converge_status = "EARLY"
+                if (self.early_converge):
+                    # TODO make this a config option
+                    # If the similarity value for any factor exceeds the threshold, stop the loop
+                    early_converge = (torch.max(max_sim, dim=-1)[0] > int(input.size(-1) * self.early_converge)).all()
+                    if early_converge == True:
+                        converge_status = "EARLY"
+                        break
+                    # If the similarity of all factors exceed the treshold, stop the loop
+                    # if (max_sim.flatten() > int(input.size(-1) * self.early_converge)).all() == True:
+                    #     break
+                # Absolute convergence is signified by identical estimates in consecutive iterations
+                # Sometimes RN can enter "bistable" state where estiamtes are flipping polarity every iteration.
+                if (estimates == old_estimates).all() == True or (VSA.inverse(estimates) == old_estimates).all() == True:
+                    converge_status = "CONVERGED"
                     break
-                # If the similarity of all factors exceed the treshold, stop the loop
-                # if all((max_sim.flatten() > int(input.size(-1) * self.early_converge)).tolist()):
-                #     break
-            # Absolute convergence is signified by identical estimates in consecutive iterations
-            # Sometimes RN can enter "bistable" state where estiamtes are flipping polarity every iteration.
-            # This is computationally slow. tolist() before all() makes it a lot faster
-            if all((estimates == old_estimates).flatten().tolist()) or all((VSA.inverse(estimates) == old_estimates).flatten().tolist()):
-                converge_status = "CONVERGED"
-                break
-            old_estimates = estimates.clone()
-        # TODO we can stop iteration count for a particular batch if it has been determined to converge, but still can't stop the loop
-        # That way we can get more accurate iteration count
+                old_estimates = estimates.clone()
+            # TODO we can stop iteration count for a particular batch if it has been determined to converge, but still can't stop the loop
+            # That way we can get more accurate iteration count
         return estimates, k+1, converge_status
 
 
@@ -149,20 +145,17 @@ class Resonator(nn.Module):
             # No batch
             assert(estimates.dim() == 2)
             b = 1
-            max_sim = torch.empty(f, dtype=torch.int64, device=self.device) 
+            # dot_similarity result type is the same as input
+            max_sim = torch.empty(f, dtype=input.dtype, device=self.device) 
         else:
             assert(input.size(0) == estimates.size(0))
             b = input.size(0)
-            max_sim = torch.empty((b, f), dtype=torch.int64, device=self.device) 
+            max_sim = torch.empty((b, f), dtype=input.dtype, device=self.device) 
 
         for i in range(estimates.size(-2)):
             # Remove the currently processing factor itself
             rolled = estimates.roll(-i, -2)
-            if estimates.dim() == 3:
-                inv_estimates = torch.stack([rolled[j][1:] for j in range(estimates.size(0))])
-            else:
-                # No batch
-                inv_estimates = rolled[1:]
+            inv_estimates = rolled[:, 1:]
 
             inv_others = VSA.multibind(inv_estimates)
             new_estimates = VSA.bind(input, inv_others)
@@ -183,7 +176,7 @@ class Resonator(nn.Module):
             # Apply stochasticity
             if (stoch == "SIMILARITY"):
                 if (self.mode == "SOFTWARE"):
-                    similarity += (torch.normal(0, input.size(-1), similarity.shape) * randomness).to(self.device).type(torch.int64)
+                    similarity += (torch.normal(0, input.size(-1), similarity.shape) * randomness).to(self.device).type(input.dtype)
                 elif (self.mode == "HARDWARE"):
                     similarity += Resonator.noise[0:_codebook.size(0)]
                     Resonator.noise = Resonator.noise.roll(-_codebook.size(0), -1)
@@ -243,11 +236,11 @@ class Resonator(nn.Module):
             # No batch
             assert(estimates.dim() == 2)
             b = 1
-            max_sim = torch.empty(f, dtype=torch.int64, device=self.device) 
+            max_sim = torch.empty(f, dtype=input.dtype, device=self.device) 
         else:
             assert(input.size(0) == estimates.size(0))
             b = input.size(0)
-            max_sim = torch.empty((b, f), dtype=torch.int64, device=self.device) 
+            max_sim = torch.empty((b, f), dtype=input.dtype, device=self.device) 
         d = input.size(-1)
 
         # Since we only target MAP, inverse of a vector itself
@@ -295,14 +288,14 @@ class Resonator(nn.Module):
                 # Apply stochasticity
                 if (stoch == "SIMILARITY"):
                     if (self.mode == "SOFTWARE"):
-                        similarity[i] += (torch.normal(0, input.size(-1), similarity[i].shape) * randomness).type(torch.int64)
+                        similarity[i] += (torch.normal(0, input.size(-1), similarity[i].shape, device=input.device) * randomness).type(input.dtype)
                     elif (self.mode == "HARDWARE"):
                         similarity[i] += Resonator.noise[0:_codebooks[i].size(0)]
                         Resonator.noise = Resonator.noise.roll(-_codebooks[i].size(0), -1)
 
                 # Apply activation; see resonator_stage_seq for detailed comments
                 if (activation == 'THRESHOLD'):
-                    similarity = torch.nn.Threshold(act_val-1, 0)(similarity[i])
+                    similarity[i] = torch.nn.Threshold(act_val-1, 0)(similarity[i])
                 elif (activation == 'SCALEDOWN'):
                     if self.mode == "SOFTWARE":
                         similarity[i] = similarity[i] // act_val
@@ -325,7 +318,7 @@ class Resonator(nn.Module):
             # Apply stochasticity
             if (stoch == "SIMILARITY"):
                 if (self.mode == "SOFTWARE"):
-                    similarity += (torch.normal(0, input.size(-1), similarity.shape) * randomness).type(torch.int64)
+                    similarity += (torch.normal(0, input.size(-1), similarity.shape, device=self.device) * randomness).type(input.dtype)
                 elif (self.mode == "HARDWARE"):
                     similarity += Resonator.noise[0:_codebooks.size(1)*f].view(f, _codebooks.size(1))
                     Resonator.noise = Resonator.noise.roll(-_codebooks.size(1)*f, -1)
