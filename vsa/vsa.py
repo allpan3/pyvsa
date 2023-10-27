@@ -284,6 +284,7 @@ class VSA:
         if cls.mode == "SOFTWARE":
             result = torch.add(input, others)
         elif cls.mode == "HARDWARE":
+            # Right now we assume the input dtype is wide enough to prevent overflow, which is most likely true since we clip in every operation
             result = torch.add(input, others)
             # Clipping
             result = torch.where(result > VSA.max_ehd, VSA.max_ehd, result)
@@ -314,7 +315,7 @@ class VSA:
         if cls.mode == "HARDWARE":
             shape = list(inputs.shape)
             del shape[-2]
-            result = torch.zeros(shape, dtype=torch.int32, device=inputs.device)
+            result = torch.zeros(shape, dtype=input.dtype, device=inputs.device)
             # Use expand and bundle methods so that clipping is taken care of
             if weights != None:
                 inputs = cls.expand(inputs, weights)
@@ -326,15 +327,10 @@ class VSA:
 
         elif cls.mode == "SOFTWARE":
             if weights != None:
-                if inputs.device.type == "cuda":
-                    # CUDA only supports float32 for matmul 
-                    result = torch.matmul(weights.unsqueeze(-2).type(torch.float32), inputs.type(torch.float32)).squeeze(-2).type(VSA.dtype)
-                else:
-                    # Add a dimension to weights so that each weight value is applied to all dimensions of the vector
-                    result = torch.matmul(weights.unsqueeze(-2), inputs).squeeze(-2)
+                # CUDA only supports float32 for matmul
+                result = torch.matmul(weights.unsqueeze(-2).type(torch.float32), inputs.type(torch.float32)).squeeze(-2).type(VSA.dtype)
             else:
                 result = torch.sum(inputs, dim=-2, dtype=VSA.dtype) 
-
 
         if quantize:
             result = cls.quantize(result)
@@ -356,25 +352,16 @@ class VSA:
             if (input.dim() >= 2 and others.dim() == 3):
                 assert(others.size(0) == input.size(-2))
                 # input is (b*, n, d) and others is (n, v, d)
-                if input.device.type == "cuda":
-                    # CUDA only supports float32 for matmul 
-                    result = torch.matmul(input.unsqueeze(-2).type(torch.float32), others.transpose(-2,-1).type(torch.float32)).squeeze(-2).type(VSA.dtype)
-                else:
-                    result = torch.matmul(input.unsqueeze(-2), others.transpose(-2,-1)).squeeze(-2)
+                # CUDA only supports float32 for matmul 
+                result = torch.matmul(input.unsqueeze(-2).type(torch.float32), others.transpose(-2,-1).type(torch.float32)).squeeze(-2).type(VSA.dtype)
             elif (input.dim() >= 1 and others.dim() == 2):
                 # input is (b*, d) and others is (v, d)
-                if input.device.type == "cuda":
-                    # CUDA only supports float32 for matmul 
-                    result = torch.matmul(input.unsqueeze(-2).type(torch.float32), others.transpose(-2,-1).type(torch.float32)).squeeze(-2).type(VSA.dtype)
-                else:
-                    result = torch.matmul(input.unsqueeze(-2), others.transpose(-2,-1)).squeeze(-2)
+                # CUDA only supports float32 for matmul 
+                result = torch.matmul(input.unsqueeze(-2).type(torch.float32), others.transpose(-2,-1).type(torch.float32)).squeeze(-2).type(VSA.dtype)
             elif (input.dim() >= 1 and others.dim() == 1):
                 # input is (b*, d) and others is (d)
-                if input.device.type == "cuda":
-                    # CUDA only supports float32 for matmul 
-                    result = torch.matmul(input.type(torch.float32), others.type(torch.float32)).type(VSA.dtype)
-                else:
-                    result = torch.matmul(input, others)
+                # CUDA only supports float32 for matmul 
+                result = torch.matmul(input.type(torch.float32), others.type(torch.float32)).type(VSA.dtype)
             else:
                 raise NotImplementedError("Not implemented for this case")
 
