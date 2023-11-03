@@ -20,6 +20,7 @@ from typing import Literal
 class VSA:
 
     mode: Literal['SOFTWARE', 'HARDWARE']
+    dtype = torch.int16
 
     def __init__(
             self,
@@ -233,7 +234,7 @@ class VSA:
         if cls.mode == "SOFTWARE":
             return torch.mul(input, others)
         elif cls.mode == "HARDWARE":
-            return torch.logical_not(torch.logical_xor(input, others)).to(input.dtype)
+            return torch.logical_xor(input, others).to(input.dtype)
 
     @classmethod
     def multibind(cls, inputs: Tensor) -> Tensor:
@@ -265,7 +266,7 @@ class VSA:
             # Parallelize many XORs in a hierarchical manner
             # for larger batches this is significantly faster
             while output.size(-2) > 1:
-                output = torch.logical_not(torch.logical_xor(output[..., 0::2, :], output[..., 1::2, :])).to(inputs.dtype)
+                output = torch.logical_xor(output[..., 0::2, :], output[..., 1::2, :]).to(inputs.dtype)
 
             output = output.squeeze(-2)
 
@@ -273,7 +274,7 @@ class VSA:
             # on the leftovers in a recursive fashion
             leftovers = torch.unbind(inputs[..., n_:, :], -2)
             for i in range(n - n_):
-                output = torch.logical_not(torch.logical_xor(output, leftovers[i])).to(inputs.dtype)
+                output = torch.logical_xor(output, leftovers[i]).to(inputs.dtype)
 
             return output.to(inputs.dtype)
 
@@ -315,7 +316,7 @@ class VSA:
         if cls.mode == "HARDWARE":
             shape = list(inputs.shape)
             del shape[-2]
-            result = torch.zeros(shape, dtype=input.dtype, device=inputs.device)
+            result = torch.zeros(shape, dtype=inputs.dtype, device=inputs.device)
             # Use expand and bundle methods so that clipping is taken care of
             if weights != None:
                 inputs = cls.expand(inputs, weights)
@@ -328,9 +329,9 @@ class VSA:
         elif cls.mode == "SOFTWARE":
             if weights != None:
                 # CUDA only supports float32 for matmul
-                result = torch.matmul(weights.unsqueeze(-2).type(torch.float32), inputs.type(torch.float32)).squeeze(-2).type(input.dtype)
+                result = torch.matmul(weights.unsqueeze(-2).type(torch.float32), inputs.type(torch.float32)).squeeze(-2).type(inputs.dtype)
             else:
-                result = torch.sum(inputs, dim=-2, dtype=input.dtype) 
+                result = torch.sum(inputs, dim=-2, dtype=inputs.dtype) 
 
         if quantize:
             result = cls.quantize(result)
@@ -402,27 +403,16 @@ class VSA:
             - others: :math:`(n*, v*, d)`:  n = vectors [optional], v each of the n vectors in self is compared to v vectors
                 - n must match the n in self [optional], v is the number of vectors to compare against each of the n vectors in self [optional]
         """
-        if cls.mode == "SOFTWARE":
-            positive = torch.tensor(1, device=input.device)
-            negative = torch.tensor(-1, device=input.device)
-            v1 = torch.where(input >= 0, positive, negative)
-            v2 = torch.where(others >= 0, positive, negative)
-        elif cls.mode == "HARDWARE":
-            positive = torch.tensor(1, device=input.device)
-            negative = torch.tensor(0, device=input.device)
-            v1 = torch.where(input >= 0, positive, negative)
-            v2 = torch.where(others >= 0, positive, negative)
-
         if (input.dim() >= 2 and others.dim() == 3):
             assert(others.size(0) == input.size(-2))
             # input is (b*, n, d) and others is (n, v, d)
-            result = torch.sum(torch.where(v1.unsqueeze(-2) == v2, 1, 0), dim=-1)
+            result = torch.sum(torch.where(input.unsqueeze(-2) == others, 1, 0), dim=-1)
         elif (input.dim() >= 1 and others.dim() == 2):
             # input is (b*, d) and others is (v, d)
-            result = torch.sum(torch.where(v1.unsqueeze(-2) == v2, 1, 0), dim=-1)
+            result = torch.sum(torch.where(input.unsqueeze(-2) == others, 1, 0), dim=-1)
         elif (input.dim() >= 1 and others.dim() == 1):
             # input is (b*, d) and others is (d)
-            result = torch.sum(torch.where(v1 == v2, 1, 0), dim=-1)
+            result = torch.sum(torch.where(input == others, 1, 0), dim=-1)
         else:
             raise NotImplementedError("Not implemented for this case") 
 
@@ -446,8 +436,8 @@ class VSA:
             positive = torch.tensor(1, dtype=input.dtype, device=input.device)
             negative = torch.tensor(-1, dtype=input.dtype, device=input.device)
         elif cls.mode == "HARDWARE":
-            positive = torch.tensor(1, dtype=input.dtype, device=input.device)
-            negative = torch.tensor(0, dtype=input.dtype, device=input.device)
+            positive = torch.tensor(0, dtype=input.dtype, device=input.device)
+            negative = torch.tensor(1, dtype=input.dtype, device=input.device)
 
         # So far doesn't seem like it's making a difference
         # if cls.mode == "SOFTWARE":
@@ -483,7 +473,7 @@ class VSA:
                     assert(input.dim() >= 2 and weight.dim() >= 1 and input.size(-2) == weight.size(-1))
                     return input * weight.unsqueeze(-1)
         elif cls.mode == "HARDWARE":
-            input = torch.where(input == 0, -1, 1)
+            input = torch.where(input == 0, 1, -1)
             if weight is None:
                 return input
             else:
@@ -498,6 +488,17 @@ class VSA:
                 result = torch.where(result < VSA.min_ehd, VSA.min_ehd, result)
                 return result
     
+    @classmethod
+    def permute(cls, input: Tensor) -> Tensor:
+        """
+        Permute the vector
+        """
+        if cls.mode == "SOFTWARE":
+            return input.roll(1, -1)
+        elif cls.mode == "HARDWARE":
+            # TODO permute per-fold
+            return input.roll(1, -1)
+
     @classmethod
     def is_quantized(cls, input: Tensor) -> bool:
         """For hardware mode, this function may not work correctly because an expanded vector

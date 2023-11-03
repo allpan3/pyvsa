@@ -155,7 +155,7 @@ class Resonator(nn.Module):
         for i in range(estimates.size(-2)):
             # Remove the currently processing factor itself
             rolled = estimates.roll(-i, -2)
-            inv_estimates = rolled[:, 1:]
+            inv_estimates = rolled[..., 1:, :]
 
             inv_others = VSA.multibind(inv_estimates)
             new_estimates = VSA.bind(input, inv_others)
