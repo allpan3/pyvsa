@@ -153,12 +153,13 @@ class Resonator(nn.Module):
             max_sim = torch.empty((b, f), dtype=input.dtype, device=self.device) 
 
         for i in range(estimates.size(-2)):
-            # Remove the currently processing factor itself
-            rolled = estimates.roll(-i, -2)
-            inv_estimates = rolled[..., 1:, :]
+            with torch.profiler.record_function("unbind"):
+                # Remove the currently processing factor itself
+                rolled = estimates.roll(-i, -2)
+                inv_estimates = rolled[..., 1:, :]
 
-            inv_others = VSA.multibind(inv_estimates)
-            new_estimates = VSA.bind(input, inv_others)
+                inv_others = VSA.multibind(inv_estimates)
+                new_estimates = VSA.bind(input, inv_others)
 
             _codebook = codebooks[i]
             # Apply to codebook vectors (want to apply different noise for each estimate-codevector comparison, this is easier to code)
@@ -171,49 +172,53 @@ class Resonator(nn.Module):
                     _codebook[Resonator.noise[0:_codebook.size(0)]] = VSA.inverse(_codebook[Resonator.noise[0:_codebook.size(0)]])
                     Resonator.noise = Resonator.noise.roll(-_codebook.size(0), 0)
             # similarity.shape = (b, v)
-            similarity = VSA.dot_similarity(new_estimates, _codebook)
 
-            # Apply stochasticity
-            if (stoch == "SIMILARITY"):
-                if (self.mode == "SOFTWARE"):
-                    similarity += (torch.normal(0, input.size(-1), similarity.shape) * randomness).to(self.device).type(input.dtype)
-                elif (self.mode == "HARDWARE"):
-                    similarity += Resonator.noise[0:_codebook.size(0)]
-                    Resonator.noise = Resonator.noise.roll(-_codebook.size(0), -1)
+            with torch.profiler.record_function("similarity"):
+                similarity = VSA.dot_similarity(new_estimates, _codebook)
 
-            # Apply activation
-            if (activation == 'THRESHOLD'):
-                # Wipe out all values below the threshold. Values equal to threshold should stay intact, the same way how we do in hardware
-                similarity = torch.nn.Threshold(act_val-1, 0)(similarity)
-            elif (activation == 'SCALEDOWN'):
-                # Sacle down has the similar effect of hardshrink as small values are even smaller. It scales down the large values, which doesn't matter
-                # Note that early convergence threshold value also needs to be scaled accordingly
-                if self.mode == "SOFTWARE":
-                    similarity = similarity // act_val
-                elif self.mode == "HARDWARE":
-                    # In hardware mode, we use right shift so small positive values are zeroed, and small negative values are pushed to -1
-                    # Scaling the value down helps with clipping. Make sure the early convergence threshold accounts for this scaling as well
-                    shift = round(math.log2(act_val))
-                    similarity = similarity >> shift
-            elif (activation == "THRESH_AND_SCALE"):
-                # Combine thresholding and scaling: all negative values are automatically wiped out, then the remaining values are scaled down
-                # Note that early convergence threshold value also needs to be scaled accordingly
-                if self.mode == "SOFTWARE":
-                    similarity = torch.nn.Threshold(0, 0)(similarity) // act_val
-                elif self.mode == "HARDWARE":
-                    # Note in hardware mode positive values are effectively thresholded by the scale factor, as small values are wiped out by right shift
-                    shift = round(math.log2(act_val))
-                    similarity = torch.nn.Threshold(0, 0)(similarity) >> shift
+            with torch.profiler.record_function("activation"):
+                # Apply stochasticity
+                if (stoch == "SIMILARITY"):
+                    if (self.mode == "SOFTWARE"):
+                        similarity += (torch.normal(0, input.size(-1), similarity.shape) * randomness).to(self.device).type(input.dtype)
+                    elif (self.mode == "HARDWARE"):
+                        similarity += Resonator.noise[0:_codebook.size(0)]
+                        Resonator.noise = Resonator.noise.roll(-_codebook.size(0), -1)
 
-            # Dot Product with the respective weights and sum, unsqueeze codebook to account for batch
-            # Update the estimate in place
-            if estimates.dim() == 3:
-                estimates[:,i] = VSA.multiset(codebooks[i].unsqueeze(0).repeat(b,1,1), similarity, quantize=True)
-                max_sim[:,i] = torch.max(similarity, dim=-1)[0]
-            else:
-                # No batch
-                estimates[i] = VSA.multiset(codebooks[i], similarity, quantize=True)
-                max_sim[i] = torch.max(similarity, dim=-1)[0]
+                # Apply activation
+                if (activation == 'THRESHOLD'):
+                    # Wipe out all values below the threshold. Values equal to threshold should stay intact, the same way how we do in hardware
+                    similarity = torch.nn.Threshold(act_val-1, 0)(similarity)
+                elif (activation == 'SCALEDOWN'):
+                    # Sacle down has the similar effect of hardshrink as small values are even smaller. It scales down the large values, which doesn't matter
+                    # Note that early convergence threshold value also needs to be scaled accordingly
+                    if self.mode == "SOFTWARE":
+                        similarity = similarity // act_val
+                    elif self.mode == "HARDWARE":
+                        # In hardware mode, we use right shift so small positive values are zeroed, and small negative values are pushed to -1
+                        # Scaling the value down helps with clipping. Make sure the early convergence threshold accounts for this scaling as well
+                        shift = round(math.log2(act_val))
+                        similarity = similarity >> shift
+                elif (activation == "THRESH_AND_SCALE"):
+                    # Combine thresholding and scaling: all negative values are automatically wiped out, then the remaining values are scaled down
+                    # Note that early convergence threshold value also needs to be scaled accordingly
+                    if self.mode == "SOFTWARE":
+                        similarity = torch.nn.Threshold(0, 0)(similarity) // act_val
+                    elif self.mode == "HARDWARE":
+                        # Note in hardware mode positive values are effectively thresholded by the scale factor, as small values are wiped out by right shift
+                        shift = round(math.log2(act_val))
+                        similarity = torch.nn.Threshold(0, 0)(similarity) >> shift
+
+            with torch.profiler.record_function("weighted_bundle"):
+                # Dot Product with the respective weights and sum, unsqueeze codebook to account for batch
+                # Update the estimate in place
+                if estimates.dim() == 3:
+                    estimates[:,i] = VSA.multiset(codebooks[i].unsqueeze(0).repeat(b,1,1), similarity, quantize=True)
+                    max_sim[:,i] = torch.max(similarity, dim=-1)[0]
+                else:
+                    # No batch
+                    estimates[i] = VSA.multiset(codebooks[i], similarity, quantize=True)
+                    max_sim[i] = torch.max(similarity, dim=-1)[0]
 
         return estimates, max_sim
 

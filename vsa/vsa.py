@@ -56,7 +56,7 @@ class VSA:
 
         self.root = root
         self.dim = dim
-        self.device = device
+        # self.device = device
         self.num_factors = num_factors
         self.num_codevectors = num_codevectors
 
@@ -66,35 +66,46 @@ class VSA:
         # Generate codebooks
         if codebooks is not None:
             print(f"Loading codebooks from {codebooks}")
-            self.codebooks = torch.load(codebooks, map_location=self.device)
+            self.codebooks = torch.load(codebooks)
         else:
             file = os.path.join(self.root, "codebooks.pt")
             if os.path.exists(file):
                 print(f"Loading codebooks from {file}")
-                self.codebooks = torch.load(file, map_location=self.device)
+                self.codebooks = torch.load(file)
             else:
                 print("Generating codebooks...", end="")
                 self.codebooks = self.gen_codebooks(file)
 
+
+        if type(self.codebooks) == list:
+            for i in range(len(self.codebooks)):
+                self.codebooks[i] = self.codebooks[i].to(device)
+        else:
+            self.codebooks = self.codebooks.to(device)
+
     def gen_codebooks(self, file) -> List[Tensor] or Tensor:
+        # * I removed all device mapping so that the codebooks are generated on CPU. This is because I want everything to be stored
+        # * on CPU during generation and saved as such. Otherwise, the data samples will be generated in GPU directly and occupying huge
+        # * amout of memory.
+
         # All factors have the same number of vectors
         if (type(self.num_codevectors) == int):
             if self.mode == "SOFTWARE":
-                l = self.random((self.num_factors, self.num_codevectors, self.dim), device=self.device)
+                l = self.random((self.num_factors, self.num_codevectors, self.dim))
             elif self.mode == "HARDWARE":
                 # Generate the first fold and generate the rest through CA90
-                l = self._gen_full_vector(self.random((self.num_factors, self.num_codevectors, self.fold_dim), device=self.device))
+                l = self._gen_full_vector(self.random((self.num_factors, self.num_codevectors, self.fold_dim)))
         # Every factor has a different number of vectors
         else:
             l = []
             for i in range(self.num_factors):
                 if self.mode == "SOFTWARE":
-                    l.append(self.random((self.num_codevectors[i], self.dim), device=self.device))
+                    l.append(self.random((self.num_codevectors[i], self.dim)))
                 elif self.mode == "HARDWARE":
-                    l.append(self._gen_full_vector(self.random((self.num_codevectors[i], self.fold_dim), device=self.device)))
+                    l.append(self._gen_full_vector(self.random((self.num_codevectors[i], self.fold_dim))))
 
             try:
-                l = torch.stack(l).to(self.device)
+                l = torch.stack(l)
             except:
                 pass
 
@@ -115,9 +126,9 @@ class VSA:
 
         if inputs.dim() == 1 and (type(codebooks) == Tensor and codebooks.dim() == 2 or type(codebooks) == list and len(codebooks) == 1 and codebooks[0].dim() == 2):
             # Input is a single vector, so must be a single codebook (tensor)
-            winners = torch.empty(len(codebooks), dtype=torch.int64, device=self.device)      # gather requires int64 for index
+            winners = torch.empty(len(codebooks), dtype=torch.int64, device=inputs.device)      # gather requires int64 for index
             # Commented out the winner_sims because they are not currently used and gather adds huge overhead especially for uneven codebooks with low batch number
-            # winner_sims = torch.empty(len(codebooks), dtype=inputs.dtype, device=self.device)
+            # winner_sims = torch.empty(len(codebooks), dtype=inputs.dtype, device=inputs.device)
             if type(codebooks) == list:
                 for i in range(len(codebooks)):
                     similarities = self.dot_similarity(inputs, codebooks[i])
@@ -134,8 +145,8 @@ class VSA:
         elif inputs.dim() >= 2 and (type(codebooks) == list and codebooks[0].dim() == 2 or codebooks.dim() == 3):
             # Input is (b, f, d) or (f, d)
             # winners shape = (b, f) or (f) [if b isn't given]
-            winners = torch.empty((*inputs.shape[:-2], len(codebooks)), dtype=torch.int64, device=self.device)
-            # winner_sims = torch.empty((*inputs.shape[:-2], len(codebooks)), dtype=inputs.dtype, device=self.device)
+            winners = torch.empty((*inputs.shape[:-2], len(codebooks)), dtype=torch.int64, device=inputs.device)
+            # winner_sims = torch.empty((*inputs.shape[:-2], len(codebooks)), dtype=inputs.dtype, device=inputs.device)
             if type(codebooks) == list:
                 for i in range(len(codebooks)):
                     similarities = self.dot_similarity(inputs[..., i, :], codebooks[i])
@@ -162,7 +173,7 @@ class VSA:
             raise NotImplementedError("Not implemented for this shape")
 
       
-    def _get_vector(self, key: tuple, codebooks = None):
+    def _get_vector(self, key: tuple, codebooks = None, device = None):
         '''
         `key` is a tuple of indices of each factor
         Instead of pre-generate the dictionary, we combine factors to get the vector on the fly
@@ -176,9 +187,9 @@ class VSA:
             if key[i] != None:
                 factors.append(codebooks[i][key[i]])
         factors = torch.stack(factors)
-        return self.multibind(factors).to(self.device)
+        return self.multibind(factors).to(device)
 
-    def get_vector(self, key: list or tuple, codebooks = None, quantize = False):
+    def get_vector(self, key: list or tuple, codebooks = None, quantize = False, device = None):
         '''
         `key` is a list of tuples in [(f0, f1, f2, ...), ...] format, or a single tuple
         fx is the index of the codevector in a codebook, which is also its label.
@@ -192,7 +203,7 @@ class VSA:
         if (type(key) == tuple):
             return self._get_vector(key, codebooks)
         else:
-            return self.multiset(torch.stack([self._get_vector(key[i], codebooks) for i in range(len(key))]), quantize=quantize)
+            return self.multiset(torch.stack([self._get_vector(key[i], codebooks) for i in range(len(key))]), quantize=quantize).to(device)
 
     @classmethod
     def empty(cls, size: tuple or torch.Size or int, dtype=None, device=None) -> Tensor:
