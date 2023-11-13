@@ -209,16 +209,19 @@ class Resonator(nn.Module):
                         shift = round(math.log2(act_val))
                         similarity = torch.nn.Threshold(0, 0)(similarity) >> shift
 
-            with torch.profiler.record_function("weighted_bundle"):
-                # Dot Product with the respective weights and sum, unsqueeze codebook to account for batch
-                # Update the estimate in place
-                if estimates.dim() == 3:
+            # Dot Product with the respective weights and sum, unsqueeze codebook to account for batch
+            # Update the estimate in place
+            if estimates.dim() == 3:
+                with torch.profiler.record_function("weighted_bundle"):
+                    # repeat is slow, but even if we split batch there's still un-utilized time in weighted_bundle. It also sometimes slows down unbinding
                     estimates[:,i] = VSA.multiset(codebooks[i].unsqueeze(0).repeat(b,1,1), similarity, quantize=True)
-                    max_sim[:,i] = torch.max(similarity, dim=-1)[0]
-                else:
-                    # No batch
-                    estimates[i] = VSA.multiset(codebooks[i], similarity, quantize=True)
-                    max_sim[i] = torch.max(similarity, dim=-1)[0]
+                    # for j in range(b):
+                    #     estimates[j,i] = VSA.multiset(codebooks[i], similarity[j], quantize=True)
+                max_sim[:,i] = torch.max(similarity, dim=-1)[0]
+            else:
+                # No batch
+                estimates[i] = VSA.multiset(codebooks[i], similarity, quantize=True)
+                max_sim[i] = torch.max(similarity, dim=-1)[0]
 
         return estimates, max_sim
 
