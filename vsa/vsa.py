@@ -338,14 +338,14 @@ class VSA:
                 result = cls.bundle(result, inputs[..., i, :])
 
         elif cls.mode == "SOFTWARE":
-        if weights != None:
-            # CUDA only supports float32 for matmul
-            if inputs.device.type == "cuda":
-                result = torch.matmul(weights.unsqueeze(-2).type(torch.float32), inputs.type(torch.float32)).squeeze(-2).type(inputs.dtype)
+            if weights != None:
+                # CUDA only supports float32 for matmul
+                if inputs.device.type == "cuda":
+                    result = torch.matmul(weights.unsqueeze(-2).type(torch.float32), inputs.type(torch.float32)).squeeze(-2).type(inputs.dtype)
+                else:
+                    result = torch.matmul(weights.unsqueeze(-2), inputs.squeeze(-2)).type(inputs.dtype)
             else:
-                result = torch.matmul(weights.unsqueeze(-2), inputs.squeeze(-2)).type(inputs.dtype)
-        else:
-            result = torch.sum(inputs, dim=-2, dtype=inputs.dtype) 
+                result = torch.sum(inputs, dim=-2, dtype=inputs.dtype) 
 
         if quantize:
             result = cls.quantize(result)
