@@ -303,8 +303,8 @@ class Resonator(nn.Module):
                     # if (self.mode == "SOFTWARE"):
                     #     similarity[i] += (torch.normal(0, input.size(-1), similarity[i].shape, device=input.device) * randomness).type(input.dtype)
                     # elif (self.mode == "HARDWARE"):
-                similarity[i] += Resonator.noise[0:_codebooks[i].size(0)]
-                Resonator.noise = Resonator.noise.roll(-_codebooks[i].size(0), -1)
+                    similarity[i] += Resonator.noise[0:_codebooks[i].size(0)]
+                    Resonator.noise = Resonator.noise.roll(-_codebooks[i].size(0), -1)
 
                 # Apply activation; see resonator_stage_seq for detailed comments
                 if (activation == 'THRESHOLD'):
