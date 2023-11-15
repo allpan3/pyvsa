@@ -48,7 +48,8 @@ class Resonator(nn.Module):
                 codebooks = self.vsa.codebooks
 
             # Pre-generate a set of noise tensors; had to put it here to accomondate the case where partial codebooks are used
-            if self.mode == "HARDWARE" and Resonator.noise == None:
+            # if self.mode == "HARDWARE" and Resonator.noise == None:
+            if Resonator.noise == None:
                 if (self.stoch == "SIMILARITY"):
                     Resonator.noise = (torch.normal(0, input.size(-1), (1659,), device=self.device) * self.randomness).type(torch.int16)
                     assert(len(Resonator.noise) > sum([codebooks[i].size(0) for i in range(len(codebooks))]))
@@ -173,17 +174,17 @@ class Resonator(nn.Module):
                     Resonator.noise = Resonator.noise.roll(-_codebook.size(0), 0)
             # similarity.shape = (b, v)
 
-            with torch.profiler.record_function("similarity"):
+            with torch.profiler.record_function("sim_act"):
                 similarity = VSA.dot_similarity(new_estimates, _codebook)
 
-            with torch.profiler.record_function("activation"):
                 # Apply stochasticity
                 if (stoch == "SIMILARITY"):
-                    if (self.mode == "SOFTWARE"):
-                        similarity += (torch.normal(0, input.size(-1), similarity.shape) * randomness).to(self.device).type(input.dtype)
-                    elif (self.mode == "HARDWARE"):
-                        similarity += Resonator.noise[0:_codebook.size(0)]
-                        Resonator.noise = Resonator.noise.roll(-_codebook.size(0), -1)
+                    # if (self.mode == "SOFTWARE"):
+                    #     similarity += (torch.normal(0, input.size(-1), similarity.shape) * randomness).to(self.device).type(input.dtype)
+                    # elif (self.mode == "HARDWARE"):
+                    # For run time eval, makes more sense to not count the noise generation time as activation
+                    similarity += Resonator.noise[0:_codebook.size(0)]
+                    Resonator.noise = Resonator.noise.roll(-_codebook.size(0), -1)
 
                 # Apply activation
                 if (activation == 'THRESHOLD'):
@@ -213,8 +214,12 @@ class Resonator(nn.Module):
             # Update the estimate in place
             if estimates.dim() == 3:
                 with torch.profiler.record_function("weighted_bundle"):
-                    # repeat is slow, but even if we split batch there's still un-utilized time in weighted_bundle. It also sometimes slows down unbinding
-                    estimates[:,i] = VSA.multiset(codebooks[i].unsqueeze(0).repeat(b,1,1), similarity, quantize=True)
+                    # Repeat somehow takes long time even when batch = 1. Maybe something is wrong with how repeat is used
+                    if b > 1:
+                        estimates[:,i] = VSA.multiset(codebooks[i].unsqueeze(0).repeat(b,1,1), similarity, quantize=True)
+                    else:
+                        estimates[:,i] = VSA.multiset(codebooks[i].unsqueeze(0), similarity, quantize=True)
+                    # repeat is slow, but even if we split batch there's still un-utilized time in weighted_bundle. It also somehow slows down everything else, so total run time is longer
                     # for j in range(b):
                     #     estimates[j,i] = VSA.multiset(codebooks[i], similarity[j], quantize=True)
                 max_sim[:,i] = torch.max(similarity, dim=-1)[0]
@@ -295,11 +300,11 @@ class Resonator(nn.Module):
 
                 # Apply stochasticity
                 if (stoch == "SIMILARITY"):
-                    if (self.mode == "SOFTWARE"):
-                        similarity[i] += (torch.normal(0, input.size(-1), similarity[i].shape, device=input.device) * randomness).type(input.dtype)
-                    elif (self.mode == "HARDWARE"):
-                        similarity[i] += Resonator.noise[0:_codebooks[i].size(0)]
-                        Resonator.noise = Resonator.noise.roll(-_codebooks[i].size(0), -1)
+                    # if (self.mode == "SOFTWARE"):
+                    #     similarity[i] += (torch.normal(0, input.size(-1), similarity[i].shape, device=input.device) * randomness).type(input.dtype)
+                    # elif (self.mode == "HARDWARE"):
+                similarity[i] += Resonator.noise[0:_codebooks[i].size(0)]
+                Resonator.noise = Resonator.noise.roll(-_codebooks[i].size(0), -1)
 
                 # Apply activation; see resonator_stage_seq for detailed comments
                 if (activation == 'THRESHOLD'):
