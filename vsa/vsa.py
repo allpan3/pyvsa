@@ -49,10 +49,10 @@ class VSA:
             # In hardware mode, we use int16 to avoid type conversion for EHD and similarity (which are generally below 16 bits)
             VSA.dtype = torch.int16
         elif VSA.mode == "SOFTWARE":
-            # Based on some preliminary experiments, float32 is faster than int32 because no type conversion needed for maymul (multiset, dot similarity)
-            # On CPU where type conversion is not needed, performance is almost the same so we use float32 for consistency
-            # VSA.dtype = torch.int32
-            VSA.dtype = torch.float32
+            # Based on some preliminary experiments, on GPU float32 is faster than int32 because no type conversion needed for matmul (multiset, dot similarity)
+            # But float32 slows down prod a lot in CPU. I think it still makes more sense to use int32.
+            VSA.dtype = torch.int32
+            # VSA.dtype = torch.float32
 
         self.root = root
         self.dim = dim
@@ -338,11 +338,14 @@ class VSA:
                 result = cls.bundle(result, inputs[..., i, :])
 
         elif cls.mode == "SOFTWARE":
-            if weights != None:
-                # CUDA only supports float32 for matmul
+        if weights != None:
+            # CUDA only supports float32 for matmul
+            if inputs.device.type == "cuda":
                 result = torch.matmul(weights.unsqueeze(-2).type(torch.float32), inputs.type(torch.float32)).squeeze(-2).type(inputs.dtype)
             else:
-                result = torch.sum(inputs, dim=-2, dtype=inputs.dtype) 
+                result = torch.matmul(weights.unsqueeze(-2), inputs.squeeze(-2)).type(inputs.dtype)
+        else:
+            result = torch.sum(inputs, dim=-2, dtype=inputs.dtype) 
 
         if quantize:
             result = cls.quantize(result)
@@ -365,15 +368,24 @@ class VSA:
                 assert(others.size(0) == input.size(-2))
                 # input is (b*, n, d) and others is (n, v, d)
                 # CUDA only supports float32 for matmul 
-                result = torch.matmul(input.unsqueeze(-2).type(torch.float32), others.transpose(-2,-1).type(torch.float32)).squeeze(-2).type(input.dtype)
+                if input.device.type == "cuda":
+                    result = torch.matmul(input.unsqueeze(-2).type(torch.float32), others.transpose(-2,-1).type(torch.float32)).squeeze(-2).type(input.dtype)
+                else:
+                    result = torch.matmul(input.unsqueeze(-2), others.transpose(-2,-1)).squeeze(-2)
             elif (input.dim() >= 1 and others.dim() == 2):
                 # input is (b*, d) and others is (v, d)
                 # CUDA only supports float32 for matmul 
-                result = torch.matmul(input.unsqueeze(-2).type(torch.float32), others.transpose(-2,-1).type(torch.float32)).squeeze(-2).type(input.dtype)
+                if input.device.type == "cuda":
+                    result = torch.matmul(input.unsqueeze(-2).type(torch.float32), others.transpose(-2,-1).type(torch.float32)).squeeze(-2).type(input.dtype)
+                else:
+                    result = torch.matmul(input.unsqueeze(-2), others.transpose(-2,-1)).squeeze(-2)
             elif (input.dim() >= 1 and others.dim() == 1):
                 # input is (b*, d) and others is (d)
                 # CUDA only supports float32 for matmul 
-                result = torch.matmul(input.type(torch.float32), others.type(torch.float32)).type(input.dtype)
+                if input.device.type == "cuda":
+                    result = torch.matmul(input.type(torch.float32), others.type(torch.float32)).type(input.dtype)
+                else:
+                    result = torch.matmul(input, others).type(input.dtype)
             else:
                 raise NotImplementedError("Not implemented for this case")
 
@@ -450,6 +462,8 @@ class VSA:
             positive = torch.tensor(0, dtype=input.dtype, device=input.device)
             negative = torch.tensor(1, dtype=input.dtype, device=input.device)
 
+        zero = torch.tensor(0, dtype=input.dtype, device=input.device)
+
         # So far doesn't seem like it's making a difference
         # if cls.mode == "SOFTWARE":
         #     # Random tiebreaker 
@@ -464,7 +478,7 @@ class VSA:
         #     tie[::2] = -1
         #     input[input==0] = tie
 
-        result = torch.where(input >= 0, positive, negative)
+        result = torch.where(input >= zero, positive, negative)
         return result
 
     @classmethod
